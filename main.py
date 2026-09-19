@@ -17,29 +17,20 @@ from kivy.metrics import dp
 from kivy.core.window import Window
 from kivy.utils import platform
 
-# ===== Config File =====
-CONFIG_FILE = '/storage/emulated/0/Download/fileshare/ftp-config.json'
+# ===== 路径配置 =====
+if platform == 'android':
+    BASE_DIR = '/storage/emulated/0/Android/data/com.zhw63.ftptool.ftptool'
+else:
+    BASE_DIR = os.path.join(os.path.expanduser('~'), 'ftptool')
+
+CONFIG_FILE = os.path.join(BASE_DIR, 'file', 'ftp-config.json')
+TXT_DIR = os.path.join(BASE_DIR, 'note')
 
 
 def load_config():
     """从本地文件读取配置"""
     with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
-
-
-def get_txt_dir():
-    """获取可写的本地目录"""
-    if platform == 'android':
-        from android import mActivity
-        base = mActivity.getExternalFilesDir(None).getAbsolutePath()
-        path = os.path.join(base, 'note')
-    else:
-        path = os.path.join(os.path.expanduser('~'), 'Download', 'fileshare', 'note')
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-TXT_DIR = get_txt_dir()
 
 
 def connect_ftp():

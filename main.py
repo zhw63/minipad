@@ -17,14 +17,37 @@ from kivy.metrics import dp
 from kivy.core.window import Window
 from kivy.utils import platform
 
-# ===== 路径配置 =====
-if platform == 'android':
-    BASE_DIR = '/storage/emulated/0/Android/data/com.zhw63.ftptool.ftptool'
-else:
-    BASE_DIR = os.path.join(os.path.expanduser('~'), 'ftptool')
 
-CONFIG_FILE = os.path.join(BASE_DIR, 'file', 'ftp-config.json')
-TXT_DIR = os.path.join(BASE_DIR, 'note')
+# ===== 权限请求 =====
+def request_storage_permission():
+    """请求存储权限"""
+    if platform == 'android':
+        try:
+            from android.permissions import request_permissions, Permission
+            request_permissions([
+                Permission.READ_EXTERNAL_STORAGE,
+                Permission.WRITE_EXTERNAL_STORAGE,
+            ])
+        except Exception as e:
+            print(f'Permission request error: {e}')
+
+
+# ===== 路径配置（使用应用专属外部目录）=====
+def get_base_dir():
+    """获取应用专属外部目录"""
+    if platform == 'android':
+        from android import mActivity
+        base = mActivity.getExternalFilesDir(None).getAbsolutePath()
+        # 返回：/storage/emulated/0/Android/data/com.zhw63.ftptool.ftptool/files
+        return base
+    else:
+        return os.path.join(os.path.expanduser('~'), 'ftptool')
+
+
+BASE_DIR = get_base_dir()
+CONFIG_DIR = os.path.join(BASE_DIR, 'file')      # .../files/file/
+CONFIG_FILE = os.path.join(CONFIG_DIR, 'ftp-config.json')
+TXT_DIR = os.path.join(BASE_DIR, 'note')         # .../files/note/
 
 
 def load_config():
@@ -50,6 +73,9 @@ class FTPApp(App):
         self.status_text = 'Ready'
 
     def build(self):
+        # 请求权限
+        request_storage_permission()
+
         Window.clearcolor = (0.12, 0.12, 0.14, 1)
 
         main = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(20))

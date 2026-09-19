@@ -12,20 +12,20 @@ from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
-from kivy.uix.textinput import TextInput
-from kivy.uix.popup import Popup
 from kivy.clock import Clock
 from kivy.metrics import dp
 from kivy.core.window import Window
 from kivy.utils import platform
 
+# ===== 路径配置 =====
+CONFIG_DIR = '/storage/emulated/0/Download/fileshare'
+CONFIG_FILE = os.path.join(CONFIG_DIR, 'ftp-config.json')
+
 
 def get_txt_dir():
-    """获取可写的本地目录"""
+    """获取 .txt 保存目录"""
     if platform == 'android':
-        from android import mActivity
-        base = mActivity.getExternalFilesDir(None).getAbsolutePath()
-        path = os.path.join(base, 'note')
+        path = os.path.join(CONFIG_DIR, 'note')
     else:
         path = os.path.join(os.path.expanduser('~'), 'Download', 'fileshare', 'note')
     os.makedirs(path, exist_ok=True)
@@ -33,31 +33,23 @@ def get_txt_dir():
 
 
 TXT_DIR = get_txt_dir()
-CONFIG_FILE = os.path.join(TXT_DIR, 'ftp_config.json')
 
 
 def load_config():
-    """读取本地配置"""
+    """读取本地配置文件"""
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except:
-            pass
+        except Exception as e:
+            print(f'Config load error: {e}')
     return None
-
-
-def save_config(config):
-    """保存配置到本地"""
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
 
 
 class FTPApp(App):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.status_text = 'Ready'
         self.config = load_config()
 
     def build(self):
@@ -74,19 +66,7 @@ class FTPApp(App):
         )
         main.add_widget(title)
 
-        # 配置按钮
-        config_btn = Button(
-            text='⚙ CONFIG',
-            font_size=dp(16),
-            background_color=(0.3, 0.3, 0.35, 1),
-            color=(0.8, 0.8, 0.8, 1),
-            size_hint_y=None,
-            height=dp(40)
-        )
-        config_btn.bind(on_press=self.show_config)
-        main.add_widget(config_btn)
-
-        # 按钮区
+        # 下载按钮
         self.download_btn = Button(
             text='DOWNLOAD',
             font_size=dp(32),
@@ -97,6 +77,7 @@ class FTPApp(App):
         self.download_btn.bind(on_press=self.on_download)
         main.add_widget(self.download_btn)
 
+        # 上传按钮
         self.upload_btn = Button(
             text='UPLOAD',
             font_size=dp(32),
@@ -118,9 +99,11 @@ class FTPApp(App):
         )
         main.add_widget(self.status_label)
 
-        # 首次启动，如果没配置，弹出配置界面
+        # 检查配置
         if not self.config:
-            Clock.schedule_once(lambda dt: self.show_config(None), 0.5)
+            self.update_status(f'Config not found: ftp-config.json')
+        else:
+            self.update_status('Ready')
 
         return main
 
@@ -128,71 +111,8 @@ class FTPApp(App):
         self.status_label.text = msg
         print(f'STATUS: {msg}')
 
-    def show_config(self, instance):
-        """配置界面"""
-        content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(15))
-
-        cfg = self.config or {}
-
-        # Host
-        content.add_widget(Label(text='Host:', size_hint_y=None, height=dp(25), halign='left'))
-        host_input = TextInput(text=cfg.get('host', ''), multiline=False, size_hint_y=None, height=dp(40))
-        content.add_widget(host_input)
-
-        # Port
-        content.add_widget(Label(text='Port:', size_hint_y=None, height=dp(25), halign='left'))
-        port_input = TextInput(text=str(cfg.get('port', 21)), multiline=False, size_hint_y=None, height=dp(40), input_filter='int')
-        content.add_widget(port_input)
-
-        # User
-        content.add_widget(Label(text='User:', size_hint_y=None, height=dp(25), halign='left'))
-        user_input = TextInput(text=cfg.get('user', ''), multiline=False, size_hint_y=None, height=dp(40))
-        content.add_widget(user_input)
-
-        # Password
-        content.add_widget(Label(text='Password:', size_hint_y=None, height=dp(25), halign='left'))
-        pass_input = TextInput(text=cfg.get('pass', ''), multiline=False, password=True, size_hint_y=None, height=dp(40))
-        content.add_widget(pass_input)
-
-        # File
-        content.add_widget(Label(text='Remote File:', size_hint_y=None, height=dp(25), halign='left'))
-        file_input = TextInput(text=cfg.get('file', 'myfile.note'), multiline=False, size_hint_y=None, height=dp(40))
-        content.add_widget(file_input)
-
-        # 按钮
-        btn_row = BoxLayout(size_hint_y=None, height=dp(45), spacing=dp(10))
-        cancel_btn = Button(text='Cancel', background_color=(0.4, 0.4, 0.4, 1))
-        save_btn = Button(text='Save', background_color=(0.2, 0.6, 0.3, 1))
-        btn_row.add_widget(cancel_btn)
-        btn_row.add_widget(save_btn)
-        content.add_widget(btn_row)
-
-        popup = Popup(
-            title='FTP Configuration',
-            content=content,
-            size_hint=(0.9, 0.85),
-            auto_dismiss=False
-        )
-
-        def on_save(*a):
-            self.config = {
-                'host': host_input.text.strip(),
-                'port': int(port_input.text.strip() or 21),
-                'user': user_input.text.strip(),
-                'pass': pass_input.text,
-                'file': file_input.text.strip() or 'myfile.note'
-            }
-            save_config(self.config)
-            popup.dismiss()
-            self.update_status('Config saved')
-
-        cancel_btn.bind(on_press=popup.dismiss)
-        save_btn.bind(on_press=on_save)
-
-        popup.open()
-
     def connect_ftp(self):
-        """使用配置连接 FTP"""
+        """连接 FTP"""
         if not self.config:
             raise Exception('No config')
         ftp = FTP()
@@ -203,7 +123,7 @@ class FTPApp(App):
 
     def on_download(self, instance):
         if not self.config:
-            self.update_status('Please configure first')
+            self.update_status('Config missing')
             return
         self.download_btn.disabled = True
         self.update_status('Connecting...')
@@ -217,7 +137,7 @@ class FTPApp(App):
             self.update_status('Downloading...')
 
             try:
-                size = ftp.size(remote_file)
+                ftp.size(remote_file)
             except:
                 self.update_status('File not found')
                 return
@@ -257,7 +177,7 @@ class FTPApp(App):
 
     def on_upload(self, instance):
         if not self.config:
-            self.update_status('Please configure first')
+            self.update_status('Config missing')
             return
         self.upload_btn.disabled = True
         self.update_status('Connecting...')

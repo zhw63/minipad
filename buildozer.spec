@@ -1,14 +1,14 @@
 [app]
-title = FTP Tool
-package.name = ftptool
-package.domain = com.zhw63.ftptool
+title = WebDAV Tool
+package.name = webdavtool
+package.domain = com.zhw63.webdavtool
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
 version = 1.0.0
 
-requirements = python3,kivy
+requirements = python3,kivy,webdavclient3,requests,urllib3,certifi,chardet,idna
 
 orientation = portrait
 fullscreen = 0
@@ -22,7 +22,7 @@ android.allow_backup = False
 android.accept_sdk_license = True
 
 p4a.branch = v2024.01.21
-requirements = python3,kivy,webdavclient3,requests,urllib3,certifi,chardet,idna
+
 [buildozer]
 log_level = 2
 warn_on_root = 1

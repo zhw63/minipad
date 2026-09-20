@@ -99,6 +99,18 @@ def make_client():
 class MiniApp(App):
 
     def build(self):
+        # ===== 权限申请（放在最前面）=====
+        if platform == 'android':
+            try:
+                from android.permissions import request_permissions, Permission
+                request_permissions([
+                    Permission.WRITE_EXTERNAL_STORAGE,
+                    Permission.READ_EXTERNAL_STORAGE
+                ])
+                log('permission requested')
+            except Exception as e:
+                log(f'permission request error: {e}')
+
         Window.clearcolor = (0.12, 0.12, 0.14, 1)
 
         main = BoxLayout(orientation='vertical', padding=dp(15), spacing=dp(10))

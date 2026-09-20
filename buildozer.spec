@@ -1,7 +1,7 @@
 [app]
 title = WebDAV Tool
-package.name = webdavtool
-package.domain = com.zhw63.webdavtool
+package.name = ftptool
+package.domain = com.zhw63.ftptool
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas

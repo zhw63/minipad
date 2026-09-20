@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-FTP Tool - Download / Upload zhw63.note
+WebDAV Tool - Download / Upload zhw63.note (坚果云)
 """
 
 import os
 import json
 import io
 from datetime import datetime
-from ftplib import FTP, error_perm
+
+from webdav3.client import Client
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -23,10 +24,9 @@ from kivy.core.window import Window
 from kivy.utils import platform
 
 # ===== Config =====
-FTP_HOST = '014.3vftp.cn'
-FTP_PORT = 3535
-FTP_USER = 'zhw63'
-REMOTE_FILE = 'zhw63.note'
+WEBDAV_HOST = 'https://dav.jianguoyun.com/dav/'
+WEBDAV_USER = 'zhw63@189.cn'
+REMOTE_FILE = 'note/zhw63.note'
 DEBUG_LOG = 'debug.log'
 
 
@@ -44,7 +44,7 @@ def get_txt_dir():
 
 
 TXT_DIR = get_txt_dir()
-PASSWORD_FILE = os.path.join(TXT_DIR, 'ftp-password.txt')
+PASSWORD_FILE = os.path.join(TXT_DIR, 'webdav-password.txt')
 
 
 def load_password():
@@ -70,52 +70,30 @@ def save_password(password):
 
 
 def log_to_server(msg):
-    """Write debug log to FTP server"""
-    password = load_password()
-    if not password:
-        print(f'LOG (no password): {msg}')
-        return
-
-    ftp = None
+    """写调试日志到本地文件（保留函数名，稳定后可删除）"""
     try:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log_entry = f'[{timestamp}] {msg}\n'
-
-        ftp = FTP()
-        ftp.connect(FTP_HOST, FTP_PORT, timeout=15)
-        ftp.login(FTP_USER, password)
-        ftp.cwd('/')
-
-        existing = ''
-        try:
-            bio = io.BytesIO()
-            ftp.retrbinary(f'RETR {DEBUG_LOG}', bio.write)
-            existing = bio.getvalue().decode('utf-8')
-        except:
-            pass
-
-        new_log = existing + log_entry
-        bio = io.BytesIO(new_log.encode('utf-8'))
-        ftp.storbinary(f'STOR {DEBUG_LOG}', bio)
-
-        ftp.quit()
+        log_path = os.path.join(TXT_DIR, DEBUG_LOG)
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(log_entry)
         print(f'LOG: {msg}')
-
     except Exception as e:
         print(f'LOG ERROR: {e}')
 
 
-def connect_ftp():
-    """Connect to FTP server, stay in root directory"""
+def get_webdav_client():
+    """创建并返回 WebDAV 客户端"""
     password = load_password()
     if not password:
         raise Exception('Password not set')
 
-    ftp = FTP()
-    ftp.connect(FTP_HOST, FTP_PORT, timeout=15)
-    ftp.login(FTP_USER, password)
-    ftp.cwd('/')
-    return ftp
+    options = {
+        'webdav_hostname': WEBDAV_HOST,
+        'webdav_login': WEBDAV_USER,
+        'webdav_password': password
+    }
+    return Client(options)
 
 
 class FTPApp(App):
@@ -157,7 +135,7 @@ class FTPApp(App):
         main = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(15))
 
         title = Label(
-            text='FTP Tool',
+            text='WebDAV Tool',
             font_size=dp(24),
             color=(1, 1, 1, 1),
             size_hint_y=None,
@@ -225,7 +203,7 @@ class FTPApp(App):
         content = BoxLayout(orientation='vertical', spacing=dp(15), padding=dp(15))
 
         tip = Label(
-            text='First run: please enter FTP password',
+            text='First run: please enter WebDAV password',
             font_size=dp(14),
             color=(0.9, 0.9, 0.9, 1),
             size_hint_y=None,
@@ -252,7 +230,7 @@ class FTPApp(App):
         content.add_widget(save_btn)
 
         popup = Popup(
-            title='FTP Password',
+            title='WebDAV Password',
             content=content,
             size_hint=(0.9, 0.45),
             auto_dismiss=False
@@ -260,165 +238,3 @@ class FTPApp(App):
 
         def on_save(instance):
             pwd = pwd_input.text.strip()
-            if not pwd:
-                tip.text = 'Password cannot be empty'
-                return
-            if save_password(pwd):
-                self.update_status('Password saved')
-                popup.dismiss()
-                log_to_server('Password saved to local file')
-            else:
-                tip.text = 'Save failed'
-
-        save_btn.bind(on_press=on_save)
-        popup.open()
-
-    def update_status(self, msg):
-        self.status_text = msg
-        self.status_label.text = msg
-        log_to_server(f'STATUS: {msg}')
-
-    def on_download(self, instance):
-        log_to_server('on_download() called')
-        self.download_btn.disabled = True
-        self.update_status('Downloading...')
-        Clock.schedule_once(lambda dt: self._do_download(), 0.1)
-
-    def _do_download(self):
-        log_to_server('_do_download() started')
-        ftp = None
-        try:
-            log_to_server('Connecting to FTP...')
-            ftp = connect_ftp()
-            log_to_server('FTP connected')
-
-            log_to_server('Checking server file...')
-            try:
-                server_size = ftp.size(REMOTE_FILE)
-                log_to_server(f'Server file size: {server_size} bytes')
-                self.update_status(f'Server: {server_size/1024:.2f} KB')
-            except Exception as e:
-                log_to_server(f'File not found on server: {e}')
-                self.update_status('File not found on server')
-                self.download_btn.disabled = False
-                return
-
-            log_to_server(f'Creating directory: {TXT_DIR}')
-            os.makedirs(TXT_DIR, exist_ok=True)
-            log_to_server('Directory ready')
-
-            note_path = os.path.join(TXT_DIR, REMOTE_FILE)
-            log_to_server(f'note_path = {note_path}')
-
-            log_to_server('Downloading...')
-            self.update_status('Downloading...')
-            with open(note_path, 'wb') as f:
-                ftp.retrbinary(f'RETR {REMOTE_FILE}', f.write)
-            log_to_server('Download complete')
-
-            log_to_server('Exporting txt...')
-            self.update_status('Exporting txt...')
-            with open(note_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            count = 0
-            for tab in data.get('tabs', []):
-                if tab.get('type') == 'text':
-                    title = tab.get('title', 'untitled')
-                    content = tab.get('content', '')
-                    safe_title = title.replace('/', '_').replace('\\', '_').replace(':', '_')
-                    txt_path = os.path.join(TXT_DIR, f'{safe_title}.txt')
-                    with open(txt_path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    count += 1
-
-            log_to_server(f'Exported {count} txt files')
-            self.update_status(f'Done: {count} txt files exported')
-
-        except Exception as e:
-            log_to_server(f'ERROR: {e}')
-            import traceback
-            log_to_server(traceback.format_exc())
-            self.update_status(f'Error: {str(e)[:50]}')
-        finally:
-            if ftp:
-                try:
-                    ftp.quit()
-                except:
-                    pass
-            self.download_btn.disabled = False
-
-    def on_upload(self, instance):
-        log_to_server('on_upload() called')
-        self.upload_btn.disabled = True
-        self.update_status('Uploading...')
-        Clock.schedule_once(lambda dt: self._do_upload(), 0.1)
-
-    def _do_upload(self):
-        log_to_server('_do_upload() started')
-        ftp = None
-        try:
-            note_path = os.path.join(TXT_DIR, REMOTE_FILE)
-            log_to_server(f'note_path = {note_path}')
-
-            if not os.path.exists(note_path):
-                log_to_server('Local .note not found')
-                self.update_status('Please download first')
-                self.upload_btn.disabled = False
-                return
-
-            log_to_server('Reading .note...')
-            with open(note_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            log_to_server('Importing txt...')
-            count = 0
-            for tab in data.get('tabs', []):
-                if tab.get('type') == 'text':
-                    title = tab.get('title', 'untitled')
-                    txt_path = os.path.join(TXT_DIR, f'{title}.txt')
-                    if os.path.exists(txt_path):
-                        with open(txt_path, 'r', encoding='utf-8') as f:
-                            new_content = f.read()
-                        if tab.get('content') != new_content:
-                            tab['content'] = new_content
-                            count += 1
-
-            if count == 0:
-                log_to_server('Nothing to update')
-                self.update_status('Nothing to update')
-                self.upload_btn.disabled = False
-                return
-
-            log_to_server(f'Updated {count} txt files')
-            with open(note_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-            log_to_server('Connecting to FTP for upload...')
-            ftp = connect_ftp()
-            log_to_server('FTP connected')
-
-            log_to_server('Uploading...')
-            self.update_status('Uploading...')
-            with open(note_path, 'rb') as f:
-                ftp.storbinary(f'STOR {REMOTE_FILE}', f)
-
-            log_to_server('Upload complete')
-            self.update_status('Upload complete')
-
-        except Exception as e:
-            log_to_server(f'ERROR: {e}')
-            import traceback
-            log_to_server(traceback.format_exc())
-            self.update_status(f'Error: {str(e)[:50]}')
-        finally:
-            if ftp:
-                try:
-                    ftp.quit()
-                except:
-                    pass
-            self.upload_btn.disabled = False
-
-
-if __name__ == '__main__':
-    FTPApp().run()

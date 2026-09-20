@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WebDAV 最小调试版 - 只下载和上传 note/zhw63.note
+WebDAV 最小调试版 - 使用 webdav4
 """
 
 import os
 from datetime import datetime
 
-from webdav3.client import Client
+from webdav4.client import Client
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -20,7 +20,6 @@ from kivy.metrics import dp
 from kivy.core.window import Window
 from kivy.utils import platform
 
-# ===== 固定配置 =====
 WEBDAV_HOST = 'https://dav.jianguoyun.com/dav/'
 WEBDAV_USER = 'zhw63@189.cn'
 REMOTE_FILE = 'note/zhw63.note'
@@ -28,7 +27,6 @@ LOCAL_FILE_NAME = 'zhw63.note'
 DEBUG_LOG = 'debug.log'
 
 
-# ===== 本地目录（延迟创建，不在 import 阶段碰文件系统）=====
 _TXT_DIR = None
 
 def get_txt_dir():
@@ -47,7 +45,6 @@ def get_txt_dir():
 
 
 def log(msg):
-    """写本地日志，任何异常都吞掉，绝不因日志失败而崩溃"""
     try:
         d = get_txt_dir()
         path = os.path.join(d, DEBUG_LOG)
@@ -88,18 +85,15 @@ def make_client():
     pwd = load_password()
     if not pwd:
         raise Exception('Password not set')
-    options = {
-        'webdav_hostname': WEBDAV_HOST,
-        'webdav_login': WEBDAV_USER,
-        'webdav_password': pwd,
-    }
-    return Client(options)
+    return Client(
+        base_url=WEBDAV_HOST,
+        auth=(WEBDAV_USER, pwd)
+    )
 
 
 class MiniApp(App):
 
     def build(self):
-        # ===== 权限申请（放在最前面）=====
         if platform == 'android':
             try:
                 from android.permissions import request_permissions, Permission
@@ -115,29 +109,24 @@ class MiniApp(App):
 
         main = BoxLayout(orientation='vertical', padding=dp(15), spacing=dp(10))
 
-        # 密码输入框
         pwd_box = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(50), spacing=dp(8))
         pwd_box.add_widget(Label(text='密码:', size_hint_x=0.25, color=(1, 1, 1, 1)))
         self.pwd_input = TextInput(multiline=False, password=True, size_hint_x=0.75)
         pwd_box.add_widget(self.pwd_input)
         main.add_widget(pwd_box)
 
-        # 保存密码按钮
         save_btn = Button(text='保存密码', size_hint_y=None, height=dp(45))
         save_btn.bind(on_press=self.on_save_pwd)
         main.add_widget(save_btn)
 
-        # 下载按钮
         dl_btn = Button(text='DOWNLOAD', size_hint_y=None, height=dp(60), font_size=dp(20))
         dl_btn.bind(on_press=self.on_download)
         main.add_widget(dl_btn)
 
-        # 上传按钮
         ul_btn = Button(text='UPLOAD', size_hint_y=None, height=dp(60), font_size=dp(20))
         ul_btn.bind(on_press=self.on_upload)
         main.add_widget(ul_btn)
 
-        # 日志区
         scroll = ScrollView()
         self.log_label = Label(
             text='Ready',
@@ -152,7 +141,6 @@ class MiniApp(App):
         scroll.add_widget(self.log_label)
         main.add_widget(scroll)
 
-        # 启动时如果本地有密码，自动填入输入框
         Clock.schedule_once(lambda dt: self.preload_pwd(), 0.2)
 
         return main
@@ -188,16 +176,16 @@ class MiniApp(App):
 
             exists = False
             try:
-                exists = client.check(REMOTE_FILE)
+                exists = client.exists(REMOTE_FILE)
             except Exception as e:
-                log(f'check error: {e}')
+                log(f'exists error: {e}')
 
             if not exists:
                 self.set_log('云端没有 note/zhw63.note')
                 return
 
             local_path = os.path.join(get_txt_dir(), LOCAL_FILE_NAME)
-            client.download_sync(remote_path=REMOTE_FILE, local_path=local_path)
+            client.download_file(from_path=REMOTE_FILE, to_path=local_path)
             size = os.path.getsize(local_path)
             self.set_log(f'下载成功: {size} 字节 -> {local_path}')
         except Exception as e:
@@ -217,7 +205,7 @@ class MiniApp(App):
             client = make_client()
             self.set_log('已创建 WebDAV 客户端')
 
-            client.upload_sync(remote_path=REMOTE_FILE, local_path=local_path)
+            client.upload_file(from_path=local_path, to_path=REMOTE_FILE)
             size = os.path.getsize(local_path)
             self.set_log(f'上传成功: {size} 字节')
         except Exception as e:

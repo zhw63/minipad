@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WebDAV Tool - Download / Upload zhw63.note (坚果云)
+WebDAV 最小调试版 - 只下载和上传 note/zhw63.note
 """
 
 import os
-import json
-import io
 from datetime import datetime
 
 from webdav3.client import Client
@@ -17,224 +15,202 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.scrollview import ScrollView
-from kivy.uix.popup import Popup
 from kivy.clock import Clock
 from kivy.metrics import dp
 from kivy.core.window import Window
 from kivy.utils import platform
 
-# ===== Config =====
+# ===== 固定配置 =====
 WEBDAV_HOST = 'https://dav.jianguoyun.com/dav/'
 WEBDAV_USER = 'zhw63@189.cn'
 REMOTE_FILE = 'note/zhw63.note'
+LOCAL_FILE_NAME = 'zhw63.note'
 DEBUG_LOG = 'debug.log'
 
 
+# ===== 本地目录（延迟创建，不在 import 阶段碰文件系统）=====
+_TXT_DIR = None
+
 def get_txt_dir():
-    """获取可写的本地目录（Android 使用外部应用专属目录）"""
+    global _TXT_DIR
+    if _TXT_DIR is not None:
+        return _TXT_DIR
     if platform == 'android':
         from android import mActivity
         base = mActivity.getExternalFilesDir(None).getAbsolutePath()
         path = os.path.join(base, 'fileshare', 'note')
     else:
         path = os.path.join(os.path.expanduser('~'), 'Download', 'fileshare', 'note')
-
     os.makedirs(path, exist_ok=True)
+    _TXT_DIR = path
     return path
 
 
-TXT_DIR = get_txt_dir()
-PASSWORD_FILE = os.path.join(TXT_DIR, 'webdav-password.txt')
+def log(msg):
+    """写本地日志，任何异常都吞掉，绝不因日志失败而崩溃"""
+    try:
+        d = get_txt_dir()
+        path = os.path.join(d, DEBUG_LOG)
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(f'[{ts}] {msg}\n')
+    except Exception:
+        pass
+    print(f'LOG: {msg}')
+
+
+def password_file_path():
+    return os.path.join(get_txt_dir(), 'webdav-password.txt')
 
 
 def load_password():
-    """从本地读取密码"""
     try:
-        if os.path.exists(PASSWORD_FILE):
-            with open(PASSWORD_FILE, 'r', encoding='utf-8') as f:
+        p = password_file_path()
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
                 return f.read().strip()
-    except Exception as e:
-        print(f'Load password error: {e}')
+    except Exception:
+        pass
     return ''
 
 
-def save_password(password):
-    """保存密码到本地"""
+def save_password(pwd):
     try:
-        with open(PASSWORD_FILE, 'w', encoding='utf-8') as f:
-            f.write(password)
+        with open(password_file_path(), 'w', encoding='utf-8') as f:
+            f.write(pwd)
         return True
     except Exception as e:
-        print(f'Save password error: {e}')
+        log(f'save_password error: {e}')
         return False
 
 
-def log_to_server(msg):
-    """写调试日志到本地文件（保留函数名，稳定后可删除）"""
-    try:
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        log_entry = f'[{timestamp}] {msg}\n'
-        log_path = os.path.join(TXT_DIR, DEBUG_LOG)
-        with open(log_path, 'a', encoding='utf-8') as f:
-            f.write(log_entry)
-        print(f'LOG: {msg}')
-    except Exception as e:
-        print(f'LOG ERROR: {e}')
-
-
-def get_webdav_client():
-    """创建并返回 WebDAV 客户端"""
-    password = load_password()
-    if not password:
+def make_client():
+    pwd = load_password()
+    if not pwd:
         raise Exception('Password not set')
-
     options = {
         'webdav_hostname': WEBDAV_HOST,
         'webdav_login': WEBDAV_USER,
-        'webdav_password': password
+        'webdav_password': pwd,
     }
     return Client(options)
 
 
-class FTPApp(App):
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.status_text = 'Ready'
+class MiniApp(App):
 
     def build(self):
-        log_to_server('=' * 50)
-        log_to_server('APP STARTED: build() called')
-        log_to_server(f'platform = {platform}')
-        log_to_server(f'platform == android? {platform == "android"}')
-        log_to_server(f'TXT_DIR = {TXT_DIR}')
-
-        # ===== Permission request =====
-        if platform == 'android':
-            log_to_server('Entering android permission block')
-            try:
-                from android.permissions import request_permissions, Permission
-                log_to_server('Successfully imported android.permissions')
-                log_to_server('Calling request_permissions...')
-                request_permissions([
-                    Permission.WRITE_EXTERNAL_STORAGE,
-                    Permission.READ_EXTERNAL_STORAGE
-                ])
-                log_to_server('request_permissions() completed')
-            except ImportError as e:
-                log_to_server(f'ERROR: Failed to import android.permissions: {e}')
-            except Exception as e:
-                log_to_server(f'ERROR: Permission request failed: {e}')
-        else:
-            log_to_server('Not Android platform, skipping permission request')
-
-        log_to_server('=' * 50)
-
         Window.clearcolor = (0.12, 0.12, 0.14, 1)
 
-        main = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(15))
+        main = BoxLayout(orientation='vertical', padding=dp(15), spacing=dp(10))
 
-        title = Label(
-            text='WebDAV Tool',
-            font_size=dp(24),
-            color=(1, 1, 1, 1),
-            size_hint_y=None,
-            height=dp(50)
-        )
-        main.add_widget(title)
+        # 密码输入框
+        pwd_box = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(50), spacing=dp(8))
+        pwd_box.add_widget(Label(text='密码:', size_hint_x=0.25, color=(1, 1, 1, 1)))
+        self.pwd_input = TextInput(multiline=False, password=True, size_hint_x=0.75)
+        pwd_box.add_widget(self.pwd_input)
+        main.add_widget(pwd_box)
 
-        status_scroll = ScrollView(
-            size_hint_y=0.3,
-            bar_width=dp(4),
-            bar_color=(0.3, 0.5, 0.8, 0.8),
-            bar_inactive_color=(0.3, 0.5, 0.8, 0.2)
-        )
-        self.status_label = Label(
-            text=self.status_text,
-            font_size=dp(14),
-            color=(0.8, 0.8, 0.8, 1),
+        # 保存密码按钮
+        save_btn = Button(text='保存密码', size_hint_y=None, height=dp(45))
+        save_btn.bind(on_press=self.on_save_pwd)
+        main.add_widget(save_btn)
+
+        # 下载按钮
+        dl_btn = Button(text='DOWNLOAD', size_hint_y=None, height=dp(60), font_size=dp(20))
+        dl_btn.bind(on_press=self.on_download)
+        main.add_widget(dl_btn)
+
+        # 上传按钮
+        ul_btn = Button(text='UPLOAD', size_hint_y=None, height=dp(60), font_size=dp(20))
+        ul_btn.bind(on_press=self.on_upload)
+        main.add_widget(ul_btn)
+
+        # 日志区
+        scroll = ScrollView()
+        self.log_label = Label(
+            text='Ready',
+            font_size=dp(12),
+            color=(0.9, 0.9, 0.9, 1),
             halign='left',
             valign='top',
-            text_size=(Window.width - dp(40), None),
-            size_hint_y=None
+            size_hint_y=None,
+            text_size=(Window.width - dp(30), None),
         )
-        self.status_label.bind(texture_size=self.status_label.setter('size'))
-        status_scroll.add_widget(self.status_label)
-        main.add_widget(status_scroll)
+        self.log_label.bind(texture_size=self.log_label.setter('size'))
+        scroll.add_widget(self.log_label)
+        main.add_widget(scroll)
 
-        btn_layout = BoxLayout(orientation='vertical', spacing=dp(20), size_hint_y=0.5)
-
-        self.download_btn = Button(
-            text='DOWNLOAD',
-            font_size=dp(28),
-            background_color=(0.2, 0.5, 0.8, 1),
-            color=(1, 1, 1, 1),
-            size_hint_y=0.45
-        )
-        self.download_btn.bind(on_press=self.on_download)
-        btn_layout.add_widget(self.download_btn)
-
-        self.upload_btn = Button(
-            text='UPLOAD',
-            font_size=dp(28),
-            background_color=(0.2, 0.7, 0.3, 1),
-            color=(1, 1, 1, 1),
-            size_hint_y=0.45
-        )
-        self.upload_btn.bind(on_press=self.on_upload)
-        btn_layout.add_widget(self.upload_btn)
-
-        main.add_widget(btn_layout)
-
-        self.update_status('Ready')
-
-        # ===== 首次运行：如果本地没密码，弹窗让用户输入 =====
-        Clock.schedule_once(lambda dt: self.check_password(), 0.3)
+        # 启动时如果本地有密码，自动填入输入框
+        Clock.schedule_once(lambda dt: self.preload_pwd(), 0.2)
 
         return main
 
-    def check_password(self):
-        """检查本地是否已有密码，没有则弹窗输入"""
-        if not load_password():
-            self.show_password_dialog()
+    def preload_pwd(self):
+        pwd = load_password()
+        if pwd:
+            self.pwd_input.text = pwd
+            self.set_log('本地已有密码，已自动填入')
 
-    def show_password_dialog(self):
-        """输入密码的弹窗"""
-        content = BoxLayout(orientation='vertical', spacing=dp(15), padding=dp(15))
+    def set_log(self, msg):
+        log(msg)
+        self.log_label.text = msg
 
-        tip = Label(
-            text='First run: please enter WebDAV password',
-            font_size=dp(14),
-            color=(0.9, 0.9, 0.9, 1),
-            size_hint_y=None,
-            height=dp(40)
-        )
-        content.add_widget(tip)
+    def on_save_pwd(self, instance):
+        pwd = self.pwd_input.text.strip()
+        if not pwd:
+            self.set_log('密码不能为空')
+            return
+        if save_password(pwd):
+            self.set_log('密码已保存')
+        else:
+            self.set_log('密码保存失败')
 
-        pwd_input = TextInput(
-            multiline=False,
-            password=True,
-            font_size=dp(18),
-            size_hint_y=None,
-            height=dp(50)
-        )
-        content.add_widget(pwd_input)
+    def on_download(self, instance):
+        self.set_log('开始下载...')
+        Clock.schedule_once(lambda dt: self._download(), 0.1)
 
-        save_btn = Button(
-            text='SAVE',
-            font_size=dp(18),
-            background_color=(0.2, 0.7, 0.3, 1),
-            size_hint_y=None,
-            height=dp(50)
-        )
-        content.add_widget(save_btn)
+    def _download(self):
+        try:
+            client = make_client()
+            self.set_log('已创建 WebDAV 客户端')
 
-        popup = Popup(
-            title='WebDAV Password',
-            content=content,
-            size_hint=(0.9, 0.45),
-            auto_dismiss=False
-        )
+            exists = False
+            try:
+                exists = client.check(REMOTE_FILE)
+            except Exception as e:
+                log(f'check error: {e}')
 
-        def on_save(instance):
-            pwd = pwd_input.text.strip()
+            if not exists:
+                self.set_log('云端没有 note/zhw63.note')
+                return
+
+            local_path = os.path.join(get_txt_dir(), LOCAL_FILE_NAME)
+            client.download_sync(remote_path=REMOTE_FILE, local_path=local_path)
+            size = os.path.getsize(local_path)
+            self.set_log(f'下载成功: {size} 字节 -> {local_path}')
+        except Exception as e:
+            self.set_log(f'下载失败: {e}')
+
+    def on_upload(self, instance):
+        self.set_log('开始上传...')
+        Clock.schedule_once(lambda dt: self._upload(), 0.1)
+
+    def _upload(self):
+        try:
+            local_path = os.path.join(get_txt_dir(), LOCAL_FILE_NAME)
+            if not os.path.exists(local_path):
+                self.set_log('本地没有 zhw63.note，请先下载')
+                return
+
+            client = make_client()
+            self.set_log('已创建 WebDAV 客户端')
+
+            client.upload_sync(remote_path=REMOTE_FILE, local_path=local_path)
+            size = os.path.getsize(local_path)
+            self.set_log(f'上传成功: {size} 字节')
+        except Exception as e:
+            self.set_log(f'上传失败: {e}')
+
+
+if __name__ == '__main__':
+    MiniApp().run()

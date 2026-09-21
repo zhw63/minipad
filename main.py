@@ -146,15 +146,15 @@ class FTPApp(App):
         )
         main.add_widget(title)
 
-        # Password row
-        pwd_box = BoxLayout(orientation='horizontal', size_hint_y=None,
-                            height=dp(45), spacing=dp(8))
-        pwd_box.add_widget(Label(text='Password:', size_hint_x=0.3, color=(1, 1, 1, 1)))
+        # Password row (hidden if password already exists)
+        self.pwd_box = BoxLayout(orientation='horizontal', size_hint_y=None,
+                                 height=dp(45), spacing=dp(8))
+        self.pwd_box.add_widget(Label(text='Password:', size_hint_x=0.3, color=(1, 1, 1, 1)))
         self.pwd_input = TextInput(multiline=False, password=True, size_hint_x=0.7)
-        pwd_box.add_widget(self.pwd_input)
-        main.add_widget(pwd_box)
+        self.pwd_box.add_widget(self.pwd_input)
+        main.add_widget(self.pwd_box)
 
-        # Save password
+        # Save password (hidden if password already exists)
         self.save_btn = Button(
             text='SAVE PASSWORD',
             font_size=dp(18),
@@ -202,11 +202,22 @@ class FTPApp(App):
         Clock.schedule_once(lambda dt: self.preload_pwd(), 0.2)
         return main
 
+    def hide_pwd_ui(self):
+        """Hide password input and save button"""
+        self.pwd_box.opacity = 0
+        self.pwd_box.disabled = True
+        self.pwd_box.height = 0
+        self.save_btn.opacity = 0
+        self.save_btn.disabled = True
+        self.save_btn.height = 0
+
     def preload_pwd(self):
         pwd = load_password()
         if pwd:
-            self.pwd_input.text = pwd
+            self.hide_pwd_ui()
             self.update_status('Password loaded')
+        else:
+            self.update_status('Please enter password and save')
 
     def update_status(self, msg):
         self.status_label.text = msg
@@ -218,6 +229,7 @@ class FTPApp(App):
             self.update_status('Password is empty')
             return
         if save_password(pwd):
+            self.hide_pwd_ui()
             self.update_status('Password saved')
         else:
             self.update_status('Password save failed')

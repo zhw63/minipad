@@ -1,5 +1,5 @@
 [app]
-title = WebDAV Tool
+title = WebDAV Note
 package.name = ftptool
 package.domain = com.zhw63.ftptool
 

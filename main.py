@@ -34,7 +34,8 @@ SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # ===== Path config =====
 if platform == 'android':
-    BASE_DIR = '/storage/emulated/0/Android/data/com.zhw63.ftptool.ftptool'
+    from android import mActivity
+    BASE_DIR = mActivity.getExternalFilesDir(None).getAbsolutePath()
 else:
     BASE_DIR = os.path.join(os.path.expanduser('~'), 'ftptool')
 

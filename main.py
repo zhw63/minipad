@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""启动测试版 - 不依赖任何 WebDAV 库"""
+"""
+Startup test - English UI only, no WebDAV, no third-party libs.
+"""
 
 import os
 from datetime import datetime
@@ -33,9 +35,9 @@ def get_txt_dir():
 def log(msg):
     try:
         d = get_txt_dir()
-        path = os.path.join(d, 'debug.log')
+        p = os.path.join(d, 'debug.log')
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        with open(path, 'a', encoding='utf-8') as f:
+        with open(p, 'a', encoding='utf-8') as f:
             f.write(f'[{ts}] {msg}\n')
     except Exception:
         pass
@@ -59,7 +61,7 @@ class TestApp(App):
         Window.clearcolor = (0.12, 0.12, 0.14, 1)
 
         main = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(15))
-        main.add_widget(Label(text='启动成功!', font_size=dp(30), color=(1, 1, 1, 1)))
+        main.add_widget(Label(text='START OK', font_size=dp(30), color=(1, 1, 1, 1)))
 
         def on_click(instance):
             try:
@@ -71,7 +73,7 @@ class TestApp(App):
             except Exception as e:
                 log(f'write error: {e}')
 
-        btn = Button(text='测试写文件', size_hint_y=None, height=dp(60))
+        btn = Button(text='TEST WRITE', size_hint_y=None, height=dp(60))
         btn.bind(on_press=on_click)
         main.add_widget(btn)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WebDAV Note - Download / Upload zhw63.note (English UI only)
+WebDAV Note - Download / Upload all files in note/ (English UI only)
 """
 
 import os
@@ -10,7 +10,8 @@ import ssl
 import base64
 import urllib.request
 import urllib.error
-from datetime import datetime
+import urllib.parse
+import xml.etree.ElementTree as ET
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -24,7 +25,9 @@ from kivy.utils import platform
 
 # ===== WebDAV config =====
 WEBDAV_USER = 'zhw63@189.cn'
-REMOTE_URL = 'https://dav.jianguoyun.com/dav/note/zhw63.note'
+WEBDAV_BASE = 'https://dav.jianguoyun.com/dav/'
+REMOTE_DIR = 'note/'
+REMOTE_DIR_URL = WEBDAV_BASE + REMOTE_DIR
 REMOTE_FILE_NAME = 'zhw63.note'
 
 # SSL: disable verification (self-use, only JianguoYun)
@@ -77,13 +80,14 @@ def make_auth_header():
     return f'Basic {token}'
 
 
-def http_request(method, url, data=None, timeout=20):
+def http_request(method, url, data=None, timeout=20, depth=None):
     auth = make_auth_header()
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header('Authorization', auth)
     req.add_header('User-Agent', 'KivyWebDAV/1.0')
+    if depth is not None:
+        req.add_header('Depth', str(depth))
     if method == 'PROPFIND':
-        req.add_header('Depth', '0')
         req.add_header('Content-Type', 'application/xml')
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as resp:
@@ -92,29 +96,85 @@ def http_request(method, url, data=None, timeout=20):
         return e.code, e.read()
 
 
-def remote_exists():
-    status, _ = http_request('PROPFIND', REMOTE_URL)
-    print(f'PROPFIND status={status}')
+# ===== WebDAV operations =====
+
+def list_remote_files():
+    """List all files under note/ (skip subdirectories). Returns list of filenames."""
+    status, body = http_request('PROPFIND', REMOTE_DIR_URL, depth=1)
+    print(f'PROPFIND status={status} size={len(body)}')
+    if status not in (200, 207):
+        raise Exception(f'PROPFIND HTTP {status}')
+
+    try:
+        text = body.decode('utf-8', errors='replace')
+        root = ET.fromstring(text)
+    except Exception as e:
+        raise Exception(f'XML parse error: {e}')
+
+    # Try with DAV: namespace first
+    names = []
+    ns_candidates = [
+        {'d': 'DAV:'},
+        {},  # no namespace
+    ]
+    for ns in ns_candidates:
+        responses = root.findall('d:response', ns) if ns else root.findall('response')
+        if not responses:
+            continue
+        for resp in responses:
+            href_el = resp.find('d:href', ns) if ns else resp.find('href')
+            if href_el is None or not href_el.text:
+                continue
+            href = urllib.parse.unquote(href_el.text)
+            # Skip the directory entry itself
+            if href.rstrip('/').endswith('note'):
+                # Actually check it's the directory, not a file named "note"
+                if href.endswith('/'):
+                    continue
+            # Skip subdirectories (end with /)
+            if href.endswith('/'):
+                continue
+            name = href.rstrip('/').split('/')[-1]
+            if name:
+                names.append(name)
+        if names:
+            break
+
+    return names
+
+
+def download_one(name):
+    """Download one file from remote note/ to local TXT_DIR."""
+    url = REMOTE_DIR_URL + urllib.parse.quote(name)
+    status, body = http_request('GET', url)
+    print(f'GET {name} status={status} size={len(body)}')
+    if status != 200:
+        raise Exception(f'GET {name} HTTP {status}')
+    local_path = os.path.join(TXT_DIR, name)
+    with open(local_path, 'wb') as f:
+        f.write(body)
+    return local_path
+
+
+def upload_one(name, local_path):
+    """Upload one local file to remote note/<name>."""
+    url = REMOTE_DIR_URL + urllib.parse.quote(name)
+    with open(local_path, 'rb') as f:
+        data = f.read()
+    status, body = http_request('PUT', url, data=data)
+    print(f'PUT {name} status={status} size={len(data)}')
+    if status not in (200, 201, 204):
+        raise Exception(f'PUT {name} HTTP {status}')
+
+
+def remote_exists(name):
+    url = REMOTE_DIR_URL + urllib.parse.quote(name)
+    status, _ = http_request('PROPFIND', url, depth=0)
+    print(f'PROPFIND {name} status={status}')
     return status in (200, 207)
 
 
-def download_remote(local_path):
-    status, body = http_request('GET', REMOTE_URL)
-    print(f'GET status={status} size={len(body)}')
-    if status != 200:
-        raise Exception(f'HTTP {status}')
-    with open(local_path, 'wb') as f:
-        f.write(body)
-
-
-def upload_remote(local_path):
-    with open(local_path, 'rb') as f:
-        data = f.read()
-    status, body = http_request('PUT', REMOTE_URL, data=data)
-    print(f'PUT status={status} size={len(data)}')
-    if status not in (200, 201, 204):
-        raise Exception(f'HTTP {status}')
-
+# ===== App =====
 
 class FTPApp(App):
 
@@ -203,7 +263,6 @@ class FTPApp(App):
         return main
 
     def hide_pwd_ui(self):
-        """Hide password input and save button"""
         self.pwd_box.opacity = 0
         self.pwd_box.disabled = True
         self.pwd_box.height = 0
@@ -234,6 +293,8 @@ class FTPApp(App):
         else:
             self.update_status('Password save failed')
 
+    # ===== DOWNLOAD =====
+
     def on_download(self, instance):
         self.download_btn.disabled = True
         self.update_status('Connecting...')
@@ -241,37 +302,49 @@ class FTPApp(App):
 
     def _do_download(self):
         try:
-            self.update_status('Checking remote...')
-            if not remote_exists():
-                self.update_status('File not found on remote')
+            ensure_dirs()
+
+            self.update_status('Listing...')
+            names = list_remote_files()
+            print(f'Remote files: {names}')
+
+            if not names:
+                self.update_status('No files on remote')
                 return
 
-            ensure_dirs()
-            note_path = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
+            total = 0
+            for name in names:
+                try:
+                    download_one(name)
+                    total += 1
+                except Exception as e:
+                    print(f'Download {name} failed: {e}')
 
-            self.update_status('Downloading...')
-            download_remote(note_path)
+            # If zhw63.note was downloaded, export tabs to txt
+            note_local = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
+            if os.path.exists(note_local):
+                try:
+                    self.update_status('Exporting...')
+                    with open(note_local, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    for tab in data.get('tabs', []):
+                        if tab.get('type') == 'text':
+                            title = tab.get('title', 'untitled')
+                            content = tab.get('content', '')
+                            safe = title.replace('/', '_').replace('\\', '_').replace(':', '_')
+                            with open(os.path.join(TXT_DIR, f'{safe}.txt'), 'w', encoding='utf-8') as f:
+                                f.write(content)
+                except Exception as e:
+                    print(f'Export error: {e}')
 
-            self.update_status('Exporting...')
-            with open(note_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            count = 0
-            for tab in data.get('tabs', []):
-                if tab.get('type') == 'text':
-                    title = tab.get('title', 'untitled')
-                    content = tab.get('content', '')
-                    safe = title.replace('/', '_').replace('\\', '_').replace(':', '_')
-                    with open(os.path.join(TXT_DIR, f'{safe}.txt'), 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    count += 1
-
-            self.update_status(f'Done: {count} files')
+            self.update_status(f'Done: {total} files')
 
         except Exception as e:
-            self.update_status(f'Error: {str(e)[:40]}')
+            self.update_status(f'Error: {str(e)[:50]}')
         finally:
             self.download_btn.disabled = False
+
+    # ===== UPLOAD =====
 
     def on_upload(self, instance):
         self.upload_btn.disabled = True
@@ -280,42 +353,59 @@ class FTPApp(App):
 
     def _do_upload(self):
         try:
-            note_path = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
+            note_local = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
+            merged_names = set()  # filenames that were merged into zhw63.note
 
-            if not os.path.exists(note_path):
-                self.update_status('Download first')
-                return
+            # Step 1: merge txt into zhw63.note
+            if os.path.exists(note_local):
+                self.update_status('Reading...')
+                with open(note_local, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
 
-            self.update_status('Reading...')
-            with open(note_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+                changed = 0
+                for tab in data.get('tabs', []):
+                    if tab.get('type') == 'text':
+                        title = tab.get('title', 'untitled')
+                        safe = title.replace('/', '_').replace('\\', '_').replace(':', '_')
+                        txt_path = os.path.join(TXT_DIR, f'{safe}.txt')
+                        if os.path.exists(txt_path):
+                            with open(txt_path, 'r', encoding='utf-8') as f:
+                                new_content = f.read()
+                            if tab.get('content') != new_content:
+                                tab['content'] = new_content
+                            merged_names.add(f'{safe}.txt')
+                            changed += 1
 
-            count = 0
-            for tab in data.get('tabs', []):
-                if tab.get('type') == 'text':
-                    title = tab.get('title', 'untitled')
-                    txt_path = os.path.join(TXT_DIR, f'{title}.txt')
-                    if os.path.exists(txt_path):
-                        with open(txt_path, 'r', encoding='utf-8') as f:
-                            new_content = f.read()
-                        if tab.get('content') != new_content:
-                            tab['content'] = new_content
-                            count += 1
+                if changed > 0:
+                    with open(note_local, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
 
-            if count == 0:
-                self.update_status('Nothing to update')
-                return
-
-            with open(note_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
+            # Step 2: upload zhw63.note + other files
             self.update_status('Uploading...')
-            upload_remote(note_path)
+            uploaded = 0
 
-            self.update_status(f'Done: {count} files')
+            if os.path.exists(note_local):
+                upload_one(REMOTE_FILE_NAME, note_local)
+                uploaded += 1
+
+            for name in os.listdir(TXT_DIR):
+                full = os.path.join(TXT_DIR, name)
+                if not os.path.isfile(full):
+                    continue
+                if name == REMOTE_FILE_NAME:
+                    continue
+                if name in merged_names:
+                    continue
+                try:
+                    upload_one(name, full)
+                    uploaded += 1
+                except Exception as e:
+                    print(f'Upload {name} failed: {e}')
+
+            self.update_status(f'Merge: {len(merged_names)}, Upload: {uploaded}')
 
         except Exception as e:
-            self.update_status(f'Error: {str(e)[:40]}')
+            self.update_status(f'Error: {str(e)[:50]}')
         finally:
             self.upload_btn.disabled = False
 

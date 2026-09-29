@@ -123,12 +123,29 @@ def parse_propfind(body):
         if href_el is None or not href_el.text:
             continue
         href = urllib.parse.unquote(href_el.text)
-        is_dir = href.endswith('/')
+
+        # Method 1: resourcetype
+        rt = resp.find('.//d:resourcetype', NS)
+        is_dir = False
+        if rt is not None:
+            if rt.find('d:collection', NS) is not None:
+                is_dir = True
+
+        # Method 2: href ends with /
+        if not is_dir and href.endswith('/'):
+            is_dir = True
+
+        # Method 3 (fallback for JianguoYun): size==0 and no extension → directory
         size_el = resp.find('.//d:getcontentlength', NS)
         size = int(size_el.text) if size_el is not None and size_el.text else -1
+        if not is_dir and size == 0:
+            tail = href.rstrip('/').split('/')[-1]
+            # No dot in name → likely a directory
+            if tail and '.' not in tail:
+                is_dir = True
+
         items.append((href, is_dir, size))
     return items
-
 
 def strip_prefix(href, remote_dir_url):
     """Strip the remote_dir_url prefix from href. remote_dir_url is unquoted already."""

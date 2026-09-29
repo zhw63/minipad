@@ -159,7 +159,17 @@ def strip_prefix(href, remote_dir_url):
     return href
 
 
-def walk_remote(rel_dir=''):
+def walk_remote(rel_dir='', visited=None, depth=0):
+    if visited is None:
+        visited = set()
+    if depth > 10:
+        debug_log(f'MAX DEPTH at {rel_dir}')
+        return []
+    if rel_dir in visited:
+        debug_log(f'SKIP visited dir: {rel_dir}')
+        return []
+    visited.add(rel_dir)
+
     url = REMOTE_DIR_URL + urllib.parse.quote(rel_dir)
     if not url.endswith('/'):
         url += '/'
@@ -182,10 +192,18 @@ def walk_remote(rel_dir=''):
         debug_log(f'  entry href={href} is_dir={is_dir} rel={rel} size={size}')
         if rel == '' or rel == '/':
             continue
+        # Skip self-entry: rel equals current dir name
+        if is_dir and rel.rstrip('/') == rel_dir.rstrip('/'):
+            debug_log(f'  skip self: {rel}')
+            continue
         if is_dir:
             sub_rel = rel.rstrip('/')
+            # Skip if already visited
+            if sub_rel in visited:
+                debug_log(f'  skip visited: {sub_rel}')
+                continue
             debug_log(f'  recurse into: {sub_rel}')
-            sub_items = walk_remote(sub_rel)
+            sub_items = walk_remote(sub_rel, visited, depth + 1)
             items.extend(sub_items)
         else:
             items.append((rel, size))

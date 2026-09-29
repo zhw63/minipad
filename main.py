@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WebDAV Note - Download / Upload all files in note/ (English UI only)
+WebDAV Note - Recursive sync of note/ folder (English UI only)
 """
 
 import os
@@ -45,6 +45,9 @@ else:
 TXT_DIR = os.path.join(BASE_DIR, 'note')
 PASSWORD_FILE = os.path.join(BASE_DIR, 'file', 'webdav-password.txt')
 
+# Files that should NOT be uploaded even if present locally (merged into .note)
+NEVER_UPLOAD_EXTS = ('.txt', '.bak')
+
 
 def ensure_dirs():
     os.makedirs(TXT_DIR, exist_ok=True)
@@ -80,7 +83,7 @@ def make_auth_header():
     return f'Basic {token}'
 
 
-def http_request(method, url, data=None, timeout=20, depth=None):
+def http_request(method, url, data=None, timeout=30, depth=None):
     auth = make_auth_header()
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header('Authorization', auth)
@@ -96,82 +99,117 @@ def http_request(method, url, data=None, timeout=20, depth=None):
         return e.code, e.read()
 
 
-# ===== WebDAV operations =====
+# ===== WebDAV helpers =====
 
-def list_remote_files():
-    """List all files under note/ (skip subdirectories). Returns list of filenames."""
-    status, body = http_request('PROPFIND', REMOTE_DIR_URL, depth=1)
-    print(f'PROPFIND status={status} size={len(body)}')
+NS = {'d': 'DAV:'}
+
+
+def parse_propfind(body):
+    """Parse PROPFIND body, return list of (href, is_dir, size)."""
+    items = []
+    text = body.decode('utf-8', errors='replace')
+    root = ET.fromstring(text)
+    for resp in root.findall('d:response', NS):
+        href_el = resp.find('d:href', NS)
+        if href_el is None or not href_el.text:
+            continue
+        href = urllib.parse.unquote(href_el.text)
+        is_dir = href.endswith('/')
+        size_el = resp.find('.//d:getcontentlength', NS)
+        size = int(size_el.text) if size_el is not None and size_el.text else -1
+        items.append((href, is_dir, size))
+    return items
+
+
+def strip_prefix(href, remote_dir_url):
+    """Strip the remote_dir_url prefix from href. remote_dir_url is unquoted already."""
+    # href like /dav/note/xxx
+    # remote_dir_url like https://dav.jianguoyun.com/dav/note/
+    # We need to compare path part only.
+    parsed = urllib.parse.urlparse(remote_dir_url)
+    base_path = parsed.path  # /dav/note/
+    if href.startswith(base_path):
+        return href[len(base_path):]
+    return href
+
+
+def walk_remote(remote_url, prefix='', first_call=True):
+    """Recursively walk remote dir. Returns list of (rel_path, size)."""
+    items = []
+    status, body = http_request('PROPFIND', remote_url, depth=1)
     if status not in (200, 207):
         raise Exception(f'PROPFIND HTTP {status}')
-
-    try:
-        text = body.decode('utf-8', errors='replace')
-        root = ET.fromstring(text)
-    except Exception as e:
-        raise Exception(f'XML parse error: {e}')
-
-    # Try with DAV: namespace first
-    names = []
-    ns_candidates = [
-        {'d': 'DAV:'},
-        {},  # no namespace
-    ]
-    for ns in ns_candidates:
-        responses = root.findall('d:response', ns) if ns else root.findall('response')
-        if not responses:
+    entries = parse_propfind(body)
+    for href, is_dir, size in entries:
+        rel = strip_prefix(href, remote_url)
+        # Skip the current dir entry itself
+        if rel == '' or rel == '/':
             continue
-        for resp in responses:
-            href_el = resp.find('d:href', ns) if ns else resp.find('href')
-            if href_el is None or not href_el.text:
-                continue
-            href = urllib.parse.unquote(href_el.text)
-            # Skip the directory entry itself
-            if href.rstrip('/').endswith('note'):
-                # Actually check it's the directory, not a file named "note"
-                if href.endswith('/'):
-                    continue
-            # Skip subdirectories (end with /)
-            if href.endswith('/'):
-                continue
-            name = href.rstrip('/').split('/')[-1]
-            if name:
-                names.append(name)
-        if names:
-            break
-
-    return names
+        if is_dir:
+            rel_dir = rel.rstrip('/')
+            sub_items = walk_remote(remote_url + rel_dir + '/', prefix + rel_dir + '/', False)
+            items.extend(sub_items)
+        else:
+            items.append((prefix + rel, size))
+    return items
 
 
-def download_one(name):
-    """Download one file from remote note/ to local TXT_DIR."""
-    url = REMOTE_DIR_URL + urllib.parse.quote(name)
+def download_one(rel_path, remote_size, stats):
+    """Download one file if needed. rel_path uses forward slashes."""
+    local_path = os.path.join(TXT_DIR, *rel_path.split('/'))
+    if os.path.exists(local_path) and os.path.getsize(local_path) == remote_size:
+        stats['skip'] += 1
+        return
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    url = REMOTE_DIR_URL + urllib.parse.quote(rel_path)
     status, body = http_request('GET', url)
-    print(f'GET {name} status={status} size={len(body)}')
+    print(f'GET {rel_path} status={status} size={len(body)}')
     if status != 200:
-        raise Exception(f'GET {name} HTTP {status}')
-    local_path = os.path.join(TXT_DIR, name)
+        raise Exception(f'GET {rel_path} HTTP {status}')
     with open(local_path, 'wb') as f:
         f.write(body)
-    return local_path
+    stats['new'] += 1
 
 
-def upload_one(name, local_path):
-    """Upload one local file to remote note/<name>."""
-    url = REMOTE_DIR_URL + urllib.parse.quote(name)
+def upload_one(rel_path):
+    """Upload one file if needed. rel_path uses forward slashes."""
+    local_path = os.path.join(TXT_DIR, *rel_path.split('/'))
+    if not os.path.isfile(local_path):
+        return False
+    local_size = os.path.getsize(local_path)
+    url = REMOTE_DIR_URL + urllib.parse.quote(rel_path)
+    # Check cloud size
+    cloud_size = None
+    try:
+        status, body = http_request('PROPFIND', url, depth=0)
+        if status in (200, 207):
+            entries = parse_propfind(body)
+            if entries:
+                _, is_dir, size = entries[0]
+                if not is_dir:
+                    cloud_size = size
+    except Exception as e:
+        print(f'PROPFIND {rel_path} error: {e}')
+    if cloud_size is not None and cloud_size == local_size:
+        return False  # skip
     with open(local_path, 'rb') as f:
         data = f.read()
     status, body = http_request('PUT', url, data=data)
-    print(f'PUT {name} status={status} size={len(data)}')
+    print(f'PUT {rel_path} status={status} size={len(data)}')
     if status not in (200, 201, 204):
-        raise Exception(f'PUT {name} HTTP {status}')
+        raise Exception(f'PUT {rel_path} HTTP {status}')
+    return True
 
 
-def remote_exists(name):
-    url = REMOTE_DIR_URL + urllib.parse.quote(name)
-    status, _ = http_request('PROPFIND', url, depth=0)
-    print(f'PROPFIND {name} status={status}')
-    return status in (200, 207)
+def walk_local(base):
+    """Walk local dir, return list of relative paths with forward slashes."""
+    results = []
+    for root, dirs, files in os.walk(base):
+        for f in files:
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, base).replace(os.sep, '/')
+            results.append(rel)
+    return results
 
 
 # ===== App =====
@@ -206,7 +244,7 @@ class FTPApp(App):
         )
         main.add_widget(title)
 
-        # Password row (hidden if password already exists)
+        # Password row
         self.pwd_box = BoxLayout(orientation='horizontal', size_hint_y=None,
                                  height=dp(45), spacing=dp(8))
         self.pwd_box.add_widget(Label(text='Password:', size_hint_x=0.3, color=(1, 1, 1, 1)))
@@ -214,7 +252,6 @@ class FTPApp(App):
         self.pwd_box.add_widget(self.pwd_input)
         main.add_widget(self.pwd_box)
 
-        # Save password (hidden if password already exists)
         self.save_btn = Button(
             text='SAVE PASSWORD',
             font_size=dp(18),
@@ -226,7 +263,6 @@ class FTPApp(App):
         self.save_btn.bind(on_press=self.on_save_pwd)
         main.add_widget(self.save_btn)
 
-        # Download
         self.download_btn = Button(
             text='DOWNLOAD',
             font_size=dp(32),
@@ -237,7 +273,6 @@ class FTPApp(App):
         self.download_btn.bind(on_press=self.on_download)
         main.add_widget(self.download_btn)
 
-        # Upload
         self.upload_btn = Button(
             text='UPLOAD',
             font_size=dp(32),
@@ -248,7 +283,6 @@ class FTPApp(App):
         self.upload_btn.bind(on_press=self.on_upload)
         main.add_widget(self.upload_btn)
 
-        # Status
         self.status_label = Label(
             text='Ready',
             font_size=dp(16),
@@ -305,22 +339,21 @@ class FTPApp(App):
             ensure_dirs()
 
             self.update_status('Listing...')
-            names = list_remote_files()
-            print(f'Remote files: {names}')
+            items = walk_remote(REMOTE_DIR_URL)
+            print(f'Remote items: {len(items)}')
 
-            if not names:
+            if not items:
                 self.update_status('No files on remote')
                 return
 
-            total = 0
-            for name in names:
+            stats = {'new': 0, 'skip': 0}
+            for rel_path, size in items:
                 try:
-                    download_one(name)
-                    total += 1
+                    download_one(rel_path, size, stats)
                 except Exception as e:
-                    print(f'Download {name} failed: {e}')
+                    print(f'Download {rel_path} failed: {e}')
 
-            # If zhw63.note was downloaded, export tabs to txt
+            # Export tabs of zhw63.note
             note_local = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
             if os.path.exists(note_local):
                 try:
@@ -337,7 +370,7 @@ class FTPApp(App):
                 except Exception as e:
                     print(f'Export error: {e}')
 
-            self.update_status(f'Done: {total} files')
+            self.update_status(f'Done: {stats["new"]} new, {stats["skip"]} skip')
 
         except Exception as e:
             self.update_status(f'Error: {str(e)[:50]}')
@@ -354,9 +387,9 @@ class FTPApp(App):
     def _do_upload(self):
         try:
             note_local = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
-            merged_names = set()  # filenames that were merged into zhw63.note
+            merged_names = set()
 
-            # Step 1: merge txt into zhw63.note
+            # Step 1: merge txt into zhw63.note (only for existing titles)
             if os.path.exists(note_local):
                 self.update_status('Reading...')
                 with open(note_local, 'r', encoding='utf-8') as f:
@@ -367,42 +400,53 @@ class FTPApp(App):
                     if tab.get('type') == 'text':
                         title = tab.get('title', 'untitled')
                         safe = title.replace('/', '_').replace('\\', '_').replace(':', '_')
-                        txt_path = os.path.join(TXT_DIR, f'{safe}.txt')
+                        txt_name = f'{safe}.txt'
+                        txt_path = os.path.join(TXT_DIR, txt_name)
                         if os.path.exists(txt_path):
                             with open(txt_path, 'r', encoding='utf-8') as f:
                                 new_content = f.read()
                             if tab.get('content') != new_content:
                                 tab['content'] = new_content
-                            merged_names.add(f'{safe}.txt')
+                            merged_names.add(txt_name)
+                            merged_names.add(f'{safe}.bak')
                             changed += 1
 
                 if changed > 0:
                     with open(note_local, 'w', encoding='utf-8') as f:
                         json.dump(data, f, ensure_ascii=False, indent=2)
 
-            # Step 2: upload zhw63.note + other files
+            # Step 2: upload all local files (recursive), skipping merged/never-upload
             self.update_status('Uploading...')
             uploaded = 0
+            skipped = 0
 
+            # zhw63.note first
             if os.path.exists(note_local):
-                upload_one(REMOTE_FILE_NAME, note_local)
-                uploaded += 1
+                try:
+                    if upload_one(REMOTE_FILE_NAME):
+                        uploaded += 1
+                    else:
+                        skipped += 1
+                except Exception as e:
+                    print(f'Upload {REMOTE_FILE_NAME} failed: {e}')
 
-            for name in os.listdir(TXT_DIR):
-                full = os.path.join(TXT_DIR, name)
-                if not os.path.isfile(full):
+            # Walk local dir
+            for rel in walk_local(TXT_DIR):
+                if rel == REMOTE_FILE_NAME:
                     continue
-                if name == REMOTE_FILE_NAME:
+                if rel in merged_names:
                     continue
-                if name in merged_names:
+                if rel.lower().endswith(NEVER_UPLOAD_EXTS):
                     continue
                 try:
-                    upload_one(name, full)
-                    uploaded += 1
+                    if upload_one(rel):
+                        uploaded += 1
+                    else:
+                        skipped += 1
                 except Exception as e:
-                    print(f'Upload {name} failed: {e}')
+                    print(f'Upload {rel} failed: {e}')
 
-            self.update_status(f'Merge: {len(merged_names)}, Upload: {uploaded}')
+            self.update_status(f'Merge: {len(merged_names)}, Upload: {uploaded}, Skip: {skipped}')
 
         except Exception as e:
             self.update_status(f'Error: {str(e)[:50]}')

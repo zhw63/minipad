@@ -53,7 +53,16 @@ def ensure_dirs():
     os.makedirs(TXT_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(PASSWORD_FILE), exist_ok=True)
 
-
+def debug_log(msg):
+    """Write debug message to note/log.txt (overwrite each run start)."""
+    try:
+        ensure_dirs()
+        p = os.path.join(TXT_DIR, 'log.txt')
+        with open(p, 'a', encoding='utf-8') as f:
+            f.write(msg + '\n')
+    except Exception as e:
+        print(f'debug_log error: {e}')
+        
 def load_password():
     try:
         if os.path.exists(PASSWORD_FILE):
@@ -133,24 +142,36 @@ def strip_prefix(href, remote_dir_url):
     return href
 
 
-def walk_remote(remote_url, prefix='', first_call=True):
-    """Recursively walk remote dir. Returns list of (rel_path, size)."""
+def walk_remote(rel_dir=''):
+    url = REMOTE_DIR_URL + urllib.parse.quote(rel_dir)
+    if not url.endswith('/'):
+        url += '/'
+    debug_log(f'WALK url={url}')
     items = []
-    status, body = http_request('PROPFIND', remote_url, depth=1)
+    status, body = http_request('PROPFIND', url, depth=1)
+    debug_log(f'WALK status={status} body_len={len(body)}')
     if status not in (200, 207):
-        raise Exception(f'PROPFIND HTTP {status}')
+        raise Exception(f'PROPFIND {rel_dir} HTTP {status}')
     entries = parse_propfind(body)
+    debug_log(f'WALK entries count={len(entries)}')
     for href, is_dir, size in entries:
-        rel = strip_prefix(href, remote_url)
-        # Skip the current dir entry itself
+        prefix = '/dav/note/'
+        if href.startswith(prefix):
+            rel = href[len(prefix):]
+        else:
+            rel = href.rstrip('/').split('/')[-1]
+            if is_dir:
+                rel += '/'
+        debug_log(f'  entry href={href} is_dir={is_dir} rel={rel} size={size}')
         if rel == '' or rel == '/':
             continue
         if is_dir:
-            rel_dir = rel.rstrip('/')
-            sub_items = walk_remote(remote_url + rel_dir + '/', prefix + rel_dir + '/', False)
+            sub_rel = rel.rstrip('/')
+            debug_log(f'  recurse into: {sub_rel}')
+            sub_items = walk_remote(sub_rel)
             items.extend(sub_items)
         else:
-            items.append((prefix + rel, size))
+            items.append((rel, size))
     return items
 
 
@@ -337,10 +358,19 @@ class FTPApp(App):
     def _do_download(self):
         try:
             ensure_dirs()
+            # Clear log at start
+            try:
+                with open(os.path.join(TXT_DIR, 'log.txt'), 'w', encoding='utf-8') as f:
+                    f.write('')
+            except Exception:
+                pass
 
+            debug_log('=== DOWNLOAD START ===')
             self.update_status('Listing...')
-            items = walk_remote(REMOTE_DIR_URL)
-            print(f'Remote items: {len(items)}')
+            items = walk_remote()
+            debug_log(f'Total items: {len(items)}')
+            for rel, sz in items:
+                debug_log(f'  ITEM {rel} ({sz})')
 
             if not items:
                 self.update_status('No files on remote')
@@ -351,9 +381,9 @@ class FTPApp(App):
                 try:
                     download_one(rel_path, size, stats)
                 except Exception as e:
+                    debug_log(f'Download {rel_path} FAILED: {e}')
                     print(f'Download {rel_path} failed: {e}')
 
-            # Export tabs of zhw63.note
             note_local = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
             if os.path.exists(note_local):
                 try:
@@ -368,11 +398,14 @@ class FTPApp(App):
                             with open(os.path.join(TXT_DIR, f'{safe}.txt'), 'w', encoding='utf-8') as f:
                                 f.write(content)
                 except Exception as e:
+                    debug_log(f'Export error: {e}')
                     print(f'Export error: {e}')
 
+            debug_log(f'=== DOWNLOAD DONE: {stats["new"]} new, {stats["skip"]} skip ===')
             self.update_status(f'Done: {stats["new"]} new, {stats["skip"]} skip')
 
         except Exception as e:
+            debug_log(f'DOWNLOAD ERROR: {e}')
             self.update_status(f'Error: {str(e)[:50]}')
         finally:
             self.download_btn.disabled = False

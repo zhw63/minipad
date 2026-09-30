@@ -162,51 +162,89 @@ def strip_prefix(href, remote_dir_url):
 def walk_remote(rel_dir='', visited=None, depth=0):
     if visited is None:
         visited = set()
-    if depth > 10:
+    if depth > 8:
         debug_log(f'MAX DEPTH at {rel_dir}')
         return []
     if rel_dir in visited:
-        debug_log(f'SKIP visited dir: {rel_dir}')
+        debug_log(f'SKIP visited: {rel_dir}')
         return []
     visited.add(rel_dir)
 
-    url = REMOTE_DIR_URL + urllib.parse.quote(rel_dir)
-    if not url.endswith('/'):
-        url += '/'
+    # Build URL
+    base = WEBDAV_BASE + REMOTE_DIR   # https://dav.jianguoyun.com/dav/note/
+    if rel_dir:
+        parts = rel_dir.rstrip('/').split('/')
+        encoded = '/'.join(urllib.parse.quote(p, safe='') for p in parts)
+        url = base + encoded + '/'
+    else:
+        url = base
+
     debug_log(f'WALK url={url}')
-    items = []
     status, body = http_request('PROPFIND', url, depth=1)
     debug_log(f'WALK status={status} body_len={len(body)}')
     if status not in (200, 207):
         raise Exception(f'PROPFIND {rel_dir} HTTP {status}')
-    entries = parse_propfind(body)
-    debug_log(f'WALK entries count={len(entries)}')
-    for href, is_dir, size in entries:
-        prefix = '/dav/note/'
-        if href.startswith(prefix):
-            rel = href[len(prefix):]
-        else:
-            rel = href.rstrip('/').split('/')[-1]
-            if is_dir:
-                rel += '/'
-        debug_log(f'  entry href={href} is_dir={is_dir} rel={rel} size={size}')
-        if rel == '' or rel == '/':
+
+    items = []
+    text = body.decode('utf-8', errors='replace')
+    root = ET.fromstring(text)
+    NS = {'d': 'DAV:'}
+
+    for resp in root.findall('d:response', NS):
+        href_el = resp.find('d:href', NS)
+        if href_el is None or not href_el.text:
             continue
-        # Skip self-entry: rel equals current dir name
-        if is_dir and rel.rstrip('/') == rel_dir.rstrip('/'):
-            debug_log(f'  skip self: {rel}')
-            continue
-        if is_dir:
-            sub_rel = rel.rstrip('/')
-            # Skip if already visited
-            if sub_rel in visited:
-                debug_log(f'  skip visited: {sub_rel}')
+        href = href_el.text
+        href_name = href.rstrip('/').split('/')[-1]
+        href_name = urllib.parse.unquote(href_name)
+
+        # 跳过目录自身（按名字判断）
+        if rel_dir:
+            if href_name == os.path.basename(rel_dir.rstrip('/')):
+                debug_log(f'  skip self: {href_name}')
                 continue
-            debug_log(f'  recurse into: {sub_rel}')
-            sub_items = walk_remote(sub_rel, visited, depth + 1)
+        else:
+            if href.rstrip('/').endswith(REMOTE_DIR.rstrip('/')):
+                debug_log(f'  skip root self')
+                continue
+
+        if not href_name:
+            continue
+
+        propstat = resp.find('d:propstat', NS)
+        if propstat is None:
+            continue
+        prop = propstat.find('d:prop', NS)
+        if prop is None:
+            continue
+
+        # 是否目录
+        rt = prop.find('d:resourcetype', NS)
+        is_dir = (rt is not None and rt.find('d:collection', NS) is not None)
+
+        # 大小
+        size = 0
+        size_el = prop.find('d:getcontentlength', NS)
+        if size_el is not None and size_el.text:
+            try:
+                size = int(size_el.text)
+            except ValueError:
+                size = 0
+
+        # 相对路径
+        if rel_dir:
+            rel_path = f'{rel_dir.rstrip("/")}/{href_name}'
+        else:
+            rel_path = href_name
+
+        debug_log(f'  entry href={href} name={href_name} is_dir={is_dir} rel={rel_path}')
+
+        if is_dir:
+            sub_items = walk_remote(rel_path, visited, depth + 1)
             items.extend(sub_items)
         else:
-            items.append((rel, size))
+            items.append((rel_path, size))
+
     return items
 
 

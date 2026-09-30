@@ -7,6 +7,7 @@ WebDAV Note - Recursive sync of note/ folder (English UI only)
 import os
 import json
 import ssl
+import time
 import base64
 import urllib.request
 import urllib.error
@@ -55,7 +56,7 @@ def ensure_dirs():
 
 
 def debug_log(msg):
-    """Write debug message to note/log.txt (append)."""
+    """Write debug message to note/log.txt."""
     try:
         ensure_dirs()
         p = os.path.join(TXT_DIR, 'log.txt')
@@ -94,20 +95,28 @@ def make_auth_header():
     return f'Basic {token}'
 
 
-def http_request(method, url, data=None, timeout=30, depth=None):
+def http_request(method, url, data=None, timeout=30, depth=None, retries=3):
     auth = make_auth_header()
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header('Authorization', auth)
-    req.add_header('User-Agent', 'KivyWebDAV/1.0')
-    if depth is not None:
-        req.add_header('Depth', str(depth))
-    if method == 'PROPFIND':
-        req.add_header('Content-Type', 'application/xml')
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as resp:
-            return resp.status, resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
+    last_err = None
+    for attempt in range(retries):
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header('Authorization', auth)
+        req.add_header('User-Agent', 'Mozilla/5.0 (Linux; Android 13)')
+        if depth is not None:
+            req.add_header('Depth', str(depth))
+        if method == 'PROPFIND':
+            req.add_header('Content-Type', 'application/xml')
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+        except Exception as e:
+            last_err = e
+            debug_log(f'HTTP {method} {url} attempt {attempt + 1} failed: {e}')
+            if attempt < retries - 1:
+                time.sleep(1)
+    raise last_err
 
 
 # ===== WebDAV helpers =====
@@ -140,6 +149,12 @@ def walk_remote(rel_dir='', visited=None, depth=0):
     if status not in (200, 207):
         raise Exception(f'PROPFIND {rel_dir} HTTP {status}')
 
+    if not rel_dir:
+        try:
+            debug_log(f'ROOT XML: {body.decode("utf-8", errors="replace")}')
+        except Exception:
+            pass
+
     items = []
     text = body.decode('utf-8', errors='replace')
     root = ET.fromstring(text)
@@ -157,7 +172,8 @@ def walk_remote(rel_dir='', visited=None, depth=0):
                 debug_log(f'  skip self: {href_name}')
                 continue
         else:
-            if href.rstrip('/').endswith(REMOTE_DIR.rstrip('/')):
+            # Root: skip only the note/ directory itself (exact match)
+            if href.rstrip('/') == '/dav/note':
                 debug_log(f'  skip root self')
                 continue
 
@@ -200,7 +216,6 @@ def walk_remote(rel_dir='', visited=None, depth=0):
 def download_one(rel_path, remote_size, stats):
     """Download one file if needed. rel_path uses forward slashes."""
     local_path = os.path.join(TXT_DIR, *rel_path.split('/'))
-    debug_log(f'DOWNLOAD_ONE rel={rel_path} -> local={local_path}')
     force = (rel_path == REMOTE_FILE_NAME)
     if not force and os.path.exists(local_path) and os.path.getsize(local_path) == remote_size:
         stats['skip'] += 1
@@ -213,9 +228,6 @@ def download_one(rel_path, remote_size, stats):
         raise Exception(f'GET {rel_path} HTTP {status}')
     with open(local_path, 'wb') as f:
         f.write(body)
-    exists = os.path.exists(local_path)
-    size_now = os.path.getsize(local_path) if exists else -1
-    debug_log(f'WRITE {local_path} exists={exists} size={size_now}')
     stats['new'] += 1
 
 
@@ -233,28 +245,30 @@ def upload_one(rel_path):
             text = body.decode('utf-8', errors='replace')
             root = ET.fromstring(text)
             for resp in root.findall('d:response', NS):
+                href_el = resp.find('d:href', NS)
+                if href_el is None or not href_el.text:
+                    continue
                 propstat = resp.find('d:propstat', NS)
                 prop = propstat.find('d:prop', NS) if propstat is not None else None
                 if prop is None:
                     continue
                 rt = prop.find('d:resourcetype', NS)
                 is_dir = (rt is not None and rt.find('d:collection', NS) is not None)
-                if not is_dir:
-                    size_el = prop.find('d:getcontentlength', NS)
-                    if size_el is not None and size_el.text:
-                        try:
-                            cloud_size = int(size_el.text)
-                        except ValueError:
-                            pass
+                size_el = prop.find('d:getcontentlength', NS)
+                if size_el is not None and size_el.text:
+                    try:
+                        cloud_size = int(size_el.text)
+                    except ValueError:
+                        cloud_size = None
                 break
     except Exception as e:
-        print(f'PROPFIND {rel_path} error: {e}')
+        debug_log(f'PROPFIND {rel_path} error: {e}')
     if cloud_size is not None and cloud_size == local_size:
         return False
     with open(local_path, 'rb') as f:
         data = f.read()
     status, body = http_request('PUT', url, data=data)
-    print(f'PUT {rel_path} status={status} size={len(data)}')
+    debug_log(f'PUT {rel_path} status={status} size={len(data)}')
     if status not in (200, 201, 204):
         raise Exception(f'PUT {rel_path} HTTP {status}')
     return True
@@ -437,8 +451,6 @@ class FTPApp(App):
                     debug_log(f'Export error: {e}')
                     print(f'Export error: {e}')
 
-            note_check = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
-            debug_log(f'CHECK {note_check} exists={os.path.exists(note_check)}')
             debug_log(f'=== DOWNLOAD DONE: {stats["new"]} new, {stats["skip"]} skip ===')
             self.update_status(f'Done: {stats["new"]} new, {stats["skip"]} skip')
 
@@ -496,6 +508,7 @@ class FTPApp(App):
                     else:
                         skipped += 1
                 except Exception as e:
+                    debug_log(f'Upload {REMOTE_FILE_NAME} failed: {e}')
                     print(f'Upload {REMOTE_FILE_NAME} failed: {e}')
 
             for rel in walk_local(TXT_DIR):
@@ -511,6 +524,7 @@ class FTPApp(App):
                     else:
                         skipped += 1
                 except Exception as e:
+                    debug_log(f'Upload {rel} failed: {e}')
                     print(f'Upload {rel} failed: {e}')
 
             self.update_status(f'Merge: {len(merged_names)}, Upload: {uploaded}, Skip: {skipped}')

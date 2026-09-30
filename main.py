@@ -53,8 +53,9 @@ def ensure_dirs():
     os.makedirs(TXT_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(PASSWORD_FILE), exist_ok=True)
 
+
 def debug_log(msg):
-    """Write debug message to note/log.txt (overwrite each run start)."""
+    """Write debug message to note/log.txt (append)."""
     try:
         ensure_dirs()
         p = os.path.join(TXT_DIR, 'log.txt')
@@ -62,7 +63,8 @@ def debug_log(msg):
             f.write(msg + '\n')
     except Exception as e:
         print(f'debug_log error: {e}')
-        
+
+
 def load_password():
     try:
         if os.path.exists(PASSWORD_FILE):
@@ -113,52 +115,6 @@ def http_request(method, url, data=None, timeout=30, depth=None):
 NS = {'d': 'DAV:'}
 
 
-def parse_propfind(body):
-    """Parse PROPFIND body, return list of (href, is_dir, size)."""
-    items = []
-    text = body.decode('utf-8', errors='replace')
-    root = ET.fromstring(text)
-    for resp in root.findall('d:response', NS):
-        href_el = resp.find('d:href', NS)
-        if href_el is None or not href_el.text:
-            continue
-        href = urllib.parse.unquote(href_el.text)
-
-        # Method 1: resourcetype
-        rt = resp.find('.//d:resourcetype', NS)
-        is_dir = False
-        if rt is not None:
-            if rt.find('d:collection', NS) is not None:
-                is_dir = True
-
-        # Method 2: href ends with /
-        if not is_dir and href.endswith('/'):
-            is_dir = True
-
-        # Method 3 (fallback for JianguoYun): size==0 and no extension → directory
-        size_el = resp.find('.//d:getcontentlength', NS)
-        size = int(size_el.text) if size_el is not None and size_el.text else -1
-        if not is_dir and size == 0:
-            tail = href.rstrip('/').split('/')[-1]
-            # No dot in name → likely a directory
-            if tail and '.' not in tail:
-                is_dir = True
-
-        items.append((href, is_dir, size))
-    return items
-
-def strip_prefix(href, remote_dir_url):
-    """Strip the remote_dir_url prefix from href. remote_dir_url is unquoted already."""
-    # href like /dav/note/xxx
-    # remote_dir_url like https://dav.jianguoyun.com/dav/note/
-    # We need to compare path part only.
-    parsed = urllib.parse.urlparse(remote_dir_url)
-    base_path = parsed.path  # /dav/note/
-    if href.startswith(base_path):
-        return href[len(base_path):]
-    return href
-
-
 def walk_remote(rel_dir='', visited=None, depth=0):
     if visited is None:
         visited = set()
@@ -184,16 +140,9 @@ def walk_remote(rel_dir='', visited=None, depth=0):
     if status not in (200, 207):
         raise Exception(f'PROPFIND {rel_dir} HTTP {status}')
 
-    if not rel_dir:
-        try:
-            debug_log(f'ROOT XML: {body.decode("utf-8", errors="replace")}')
-        except Exception:
-            pass
-
     items = []
     text = body.decode('utf-8', errors='replace')
     root = ET.fromstring(text)
-    NS = {'d': 'DAV:'}
 
     for resp in root.findall('d:response', NS):
         href_el = resp.find('d:href', NS)
@@ -251,17 +200,22 @@ def walk_remote(rel_dir='', visited=None, depth=0):
 def download_one(rel_path, remote_size, stats):
     """Download one file if needed. rel_path uses forward slashes."""
     local_path = os.path.join(TXT_DIR, *rel_path.split('/'))
-    if os.path.exists(local_path) and os.path.getsize(local_path) == remote_size:
+    debug_log(f'DOWNLOAD_ONE rel={rel_path} -> local={local_path}')
+    force = (rel_path == REMOTE_FILE_NAME)
+    if not force and os.path.exists(local_path) and os.path.getsize(local_path) == remote_size:
         stats['skip'] += 1
         return
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
     url = REMOTE_DIR_URL + urllib.parse.quote(rel_path)
     status, body = http_request('GET', url)
-    print(f'GET {rel_path} status={status} size={len(body)}')
+    debug_log(f'GET {rel_path} status={status} size={len(body)}')
     if status != 200:
         raise Exception(f'GET {rel_path} HTTP {status}')
     with open(local_path, 'wb') as f:
         f.write(body)
+    exists = os.path.exists(local_path)
+    size_now = os.path.getsize(local_path) if exists else -1
+    debug_log(f'WRITE {local_path} exists={exists} size={size_now}')
     stats['new'] += 1
 
 
@@ -272,20 +226,31 @@ def upload_one(rel_path):
         return False
     local_size = os.path.getsize(local_path)
     url = REMOTE_DIR_URL + urllib.parse.quote(rel_path)
-    # Check cloud size
     cloud_size = None
     try:
         status, body = http_request('PROPFIND', url, depth=0)
         if status in (200, 207):
-            entries = parse_propfind(body)
-            if entries:
-                _, is_dir, size = entries[0]
+            text = body.decode('utf-8', errors='replace')
+            root = ET.fromstring(text)
+            for resp in root.findall('d:response', NS):
+                propstat = resp.find('d:propstat', NS)
+                prop = propstat.find('d:prop', NS) if propstat is not None else None
+                if prop is None:
+                    continue
+                rt = prop.find('d:resourcetype', NS)
+                is_dir = (rt is not None and rt.find('d:collection', NS) is not None)
                 if not is_dir:
-                    cloud_size = size
+                    size_el = prop.find('d:getcontentlength', NS)
+                    if size_el is not None and size_el.text:
+                        try:
+                            cloud_size = int(size_el.text)
+                        except ValueError:
+                            pass
+                break
     except Exception as e:
         print(f'PROPFIND {rel_path} error: {e}')
     if cloud_size is not None and cloud_size == local_size:
-        return False  # skip
+        return False
     with open(local_path, 'rb') as f:
         data = f.read()
     status, body = http_request('PUT', url, data=data)
@@ -338,7 +303,6 @@ class FTPApp(App):
         )
         main.add_widget(title)
 
-        # Password row
         self.pwd_box = BoxLayout(orientation='horizontal', size_hint_y=None,
                                  height=dp(45), spacing=dp(8))
         self.pwd_box.add_widget(Label(text='Password:', size_hint_x=0.3, color=(1, 1, 1, 1)))
@@ -431,7 +395,6 @@ class FTPApp(App):
     def _do_download(self):
         try:
             ensure_dirs()
-            # Clear log at start
             try:
                 with open(os.path.join(TXT_DIR, 'log.txt'), 'w', encoding='utf-8') as f:
                     f.write('')
@@ -474,6 +437,8 @@ class FTPApp(App):
                     debug_log(f'Export error: {e}')
                     print(f'Export error: {e}')
 
+            note_check = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
+            debug_log(f'CHECK {note_check} exists={os.path.exists(note_check)}')
             debug_log(f'=== DOWNLOAD DONE: {stats["new"]} new, {stats["skip"]} skip ===')
             self.update_status(f'Done: {stats["new"]} new, {stats["skip"]} skip')
 
@@ -495,7 +460,6 @@ class FTPApp(App):
             note_local = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
             merged_names = set()
 
-            # Step 1: merge txt into zhw63.note (only for existing titles)
             if os.path.exists(note_local):
                 self.update_status('Reading...')
                 with open(note_local, 'r', encoding='utf-8') as f:
@@ -521,12 +485,10 @@ class FTPApp(App):
                     with open(note_local, 'w', encoding='utf-8') as f:
                         json.dump(data, f, ensure_ascii=False, indent=2)
 
-            # Step 2: upload all local files (recursive), skipping merged/never-upload
             self.update_status('Uploading...')
             uploaded = 0
             skipped = 0
 
-            # zhw63.note first
             if os.path.exists(note_local):
                 try:
                     if upload_one(REMOTE_FILE_NAME):
@@ -536,7 +498,6 @@ class FTPApp(App):
                 except Exception as e:
                     print(f'Upload {REMOTE_FILE_NAME} failed: {e}')
 
-            # Walk local dir
             for rel in walk_local(TXT_DIR):
                 if rel == REMOTE_FILE_NAME:
                     continue

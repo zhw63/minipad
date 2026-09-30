@@ -170,8 +170,7 @@ def walk_remote(rel_dir='', visited=None, depth=0):
         return []
     visited.add(rel_dir)
 
-    # Build URL
-    base = WEBDAV_BASE + REMOTE_DIR   # https://dav.jianguoyun.com/dav/note/
+    base = WEBDAV_BASE + REMOTE_DIR
     if rel_dir:
         parts = rel_dir.rstrip('/').split('/')
         encoded = '/'.join(urllib.parse.quote(p, safe='') for p in parts)
@@ -184,6 +183,12 @@ def walk_remote(rel_dir='', visited=None, depth=0):
     debug_log(f'WALK status={status} body_len={len(body)}')
     if status not in (200, 207):
         raise Exception(f'PROPFIND {rel_dir} HTTP {status}')
+
+    if not rel_dir:
+        try:
+            debug_log(f'ROOT XML: {body.decode("utf-8", errors="replace")}')
+        except Exception:
+            pass
 
     items = []
     text = body.decode('utf-8', errors='replace')
@@ -198,7 +203,6 @@ def walk_remote(rel_dir='', visited=None, depth=0):
         href_name = href.rstrip('/').split('/')[-1]
         href_name = urllib.parse.unquote(href_name)
 
-        # 跳过目录自身（按名字判断）
         if rel_dir:
             if href_name == os.path.basename(rel_dir.rstrip('/')):
                 debug_log(f'  skip self: {href_name}')
@@ -212,26 +216,22 @@ def walk_remote(rel_dir='', visited=None, depth=0):
             continue
 
         propstat = resp.find('d:propstat', NS)
-        if propstat is None:
-            continue
-        prop = propstat.find('d:prop', NS)
-        if prop is None:
-            continue
+        prop = propstat.find('d:prop', NS) if propstat is not None else None
 
-        # 是否目录
-        rt = prop.find('d:resourcetype', NS)
-        is_dir = (rt is not None and rt.find('d:collection', NS) is not None)
+        is_dir = False
+        if prop is not None:
+            rt = prop.find('d:resourcetype', NS)
+            is_dir = (rt is not None and rt.find('d:collection', NS) is not None)
 
-        # 大小
         size = 0
-        size_el = prop.find('d:getcontentlength', NS)
-        if size_el is not None and size_el.text:
-            try:
-                size = int(size_el.text)
-            except ValueError:
-                size = 0
+        if prop is not None:
+            size_el = prop.find('d:getcontentlength', NS)
+            if size_el is not None and size_el.text:
+                try:
+                    size = int(size_el.text)
+                except ValueError:
+                    size = 0
 
-        # 相对路径
         if rel_dir:
             rel_path = f'{rel_dir.rstrip("/")}/{href_name}'
         else:

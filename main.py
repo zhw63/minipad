@@ -55,17 +55,6 @@ def ensure_dirs():
     os.makedirs(os.path.dirname(PASSWORD_FILE), exist_ok=True)
 
 
-def debug_log(msg):
-    """Write debug message to note/log.txt."""
-    try:
-        ensure_dirs()
-        p = os.path.join(TXT_DIR, 'log.txt')
-        with open(p, 'a', encoding='utf-8') as f:
-            f.write(msg + '\n')
-    except Exception as e:
-        print(f'debug_log error: {e}')
-
-
 def load_password():
     try:
         if os.path.exists(PASSWORD_FILE):
@@ -113,7 +102,7 @@ def http_request(method, url, data=None, timeout=30, depth=None, retries=3):
             return e.code, e.read()
         except Exception as e:
             last_err = e
-            debug_log(f'HTTP {method} {url} attempt {attempt + 1} failed: {e}')
+            print(f'HTTP {method} {url} attempt {attempt + 1} failed: {e}')
             if attempt < retries - 1:
                 time.sleep(1)
     raise last_err
@@ -128,10 +117,8 @@ def walk_remote(rel_dir='', visited=None, depth=0):
     if visited is None:
         visited = set()
     if depth > 8:
-        debug_log(f'MAX DEPTH at {rel_dir}')
         return []
     if rel_dir in visited:
-        debug_log(f'SKIP visited: {rel_dir}')
         return []
     visited.add(rel_dir)
 
@@ -143,17 +130,9 @@ def walk_remote(rel_dir='', visited=None, depth=0):
     else:
         url = base
 
-    debug_log(f'WALK url={url}')
     status, body = http_request('PROPFIND', url, depth=1)
-    debug_log(f'WALK status={status} body_len={len(body)}')
     if status not in (200, 207):
         raise Exception(f'PROPFIND {rel_dir} HTTP {status}')
-
-    if not rel_dir:
-        try:
-            debug_log(f'ROOT XML: {body.decode("utf-8", errors="replace")}')
-        except Exception:
-            pass
 
     items = []
     text = body.decode('utf-8', errors='replace')
@@ -169,12 +148,10 @@ def walk_remote(rel_dir='', visited=None, depth=0):
 
         if rel_dir:
             if href_name == os.path.basename(rel_dir.rstrip('/')):
-                debug_log(f'  skip self: {href_name}')
                 continue
         else:
             # Root: skip only the note/ directory itself (exact match)
             if href.rstrip('/') == '/dav/note':
-                debug_log(f'  skip root self')
                 continue
 
         if not href_name:
@@ -202,8 +179,6 @@ def walk_remote(rel_dir='', visited=None, depth=0):
         else:
             rel_path = href_name
 
-        debug_log(f'  entry href={href} name={href_name} is_dir={is_dir} rel={rel_path}')
-
         if is_dir:
             sub_items = walk_remote(rel_path, visited, depth + 1)
             items.extend(sub_items)
@@ -223,7 +198,7 @@ def download_one(rel_path, remote_size, stats):
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
     url = REMOTE_DIR_URL + urllib.parse.quote(rel_path)
     status, body = http_request('GET', url)
-    debug_log(f'GET {rel_path} status={status} size={len(body)}')
+    print(f'GET {rel_path} status={status} size={len(body)}')
     if status != 200:
         raise Exception(f'GET {rel_path} HTTP {status}')
     with open(local_path, 'wb') as f:
@@ -252,8 +227,6 @@ def upload_one(rel_path):
                 prop = propstat.find('d:prop', NS) if propstat is not None else None
                 if prop is None:
                     continue
-                rt = prop.find('d:resourcetype', NS)
-                is_dir = (rt is not None and rt.find('d:collection', NS) is not None)
                 size_el = prop.find('d:getcontentlength', NS)
                 if size_el is not None and size_el.text:
                     try:
@@ -262,13 +235,13 @@ def upload_one(rel_path):
                         cloud_size = None
                 break
     except Exception as e:
-        debug_log(f'PROPFIND {rel_path} error: {e}')
+        print(f'PROPFIND {rel_path} error: {e}')
     if cloud_size is not None and cloud_size == local_size:
         return False
     with open(local_path, 'rb') as f:
         data = f.read()
     status, body = http_request('PUT', url, data=data)
-    debug_log(f'PUT {rel_path} status={status} size={len(data)}')
+    print(f'PUT {rel_path} status={status} size={len(data)}')
     if status not in (200, 201, 204):
         raise Exception(f'PUT {rel_path} HTTP {status}')
     return True
@@ -409,18 +382,8 @@ class FTPApp(App):
     def _do_download(self):
         try:
             ensure_dirs()
-            try:
-                with open(os.path.join(TXT_DIR, 'log.txt'), 'w', encoding='utf-8') as f:
-                    f.write('')
-            except Exception:
-                pass
-
-            debug_log('=== DOWNLOAD START ===')
             self.update_status('Listing...')
             items = walk_remote()
-            debug_log(f'Total items: {len(items)}')
-            for rel, sz in items:
-                debug_log(f'  ITEM {rel} ({sz})')
 
             if not items:
                 self.update_status('No files on remote')
@@ -431,7 +394,6 @@ class FTPApp(App):
                 try:
                     download_one(rel_path, size, stats)
                 except Exception as e:
-                    debug_log(f'Download {rel_path} FAILED: {e}')
                     print(f'Download {rel_path} failed: {e}')
 
             note_local = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
@@ -448,14 +410,11 @@ class FTPApp(App):
                             with open(os.path.join(TXT_DIR, f'{safe}.txt'), 'w', encoding='utf-8') as f:
                                 f.write(content)
                 except Exception as e:
-                    debug_log(f'Export error: {e}')
                     print(f'Export error: {e}')
 
-            debug_log(f'=== DOWNLOAD DONE: {stats["new"]} new, {stats["skip"]} skip ===')
             self.update_status(f'Done: {stats["new"]} new, {stats["skip"]} skip')
 
         except Exception as e:
-            debug_log(f'DOWNLOAD ERROR: {e}')
             self.update_status(f'Error: {str(e)[:50]}')
         finally:
             self.download_btn.disabled = False
@@ -508,7 +467,6 @@ class FTPApp(App):
                     else:
                         skipped += 1
                 except Exception as e:
-                    debug_log(f'Upload {REMOTE_FILE_NAME} failed: {e}')
                     print(f'Upload {REMOTE_FILE_NAME} failed: {e}')
 
             for rel in walk_local(TXT_DIR):
@@ -524,7 +482,6 @@ class FTPApp(App):
                     else:
                         skipped += 1
                 except Exception as e:
-                    debug_log(f'Upload {rel} failed: {e}')
                     print(f'Upload {rel} failed: {e}')
 
             self.update_status(f'Merge: {len(merged_names)}, Upload: {uploaded}, Skip: {skipped}')

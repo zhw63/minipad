@@ -46,9 +46,6 @@ else:
 TXT_DIR = os.path.join(BASE_DIR, 'note')
 PASSWORD_FILE = os.path.join(BASE_DIR, 'file', 'webdav-password.txt')
 
-# Files that should NOT be uploaded even if present locally (merged into .note)
-NEVER_UPLOAD_EXTS = ('.txt', '.bak')
-
 
 def ensure_dirs():
     os.makedirs(TXT_DIR, exist_ok=True)
@@ -150,7 +147,6 @@ def walk_remote(rel_dir='', visited=None, depth=0):
             if href_name == os.path.basename(rel_dir.rstrip('/')):
                 continue
         else:
-            # Root: skip only the note/ directory itself (exact match)
             if href.rstrip('/') == '/dav/note':
                 continue
 
@@ -206,6 +202,27 @@ def download_one(rel_path, remote_size, stats):
     stats['new'] += 1
 
 
+def ensure_remote_dir(rel_dir):
+    """Create remote directory (and all parents) via MKCOL. rel_dir uses forward slashes."""
+    if not rel_dir:
+        return True
+    parts = rel_dir.strip('/').split('/')
+    current = ''
+    for part in parts:
+        if not part:
+            continue
+        current = f'{current}/{part}' if current else part
+        url = REMOTE_DIR_URL + urllib.parse.quote(current) + '/'
+        try:
+            status, body = http_request('MKCOL', url, retries=1)
+            # 201 = created, 405 = already exists
+            if status not in (201, 405):
+                print(f'MKCOL {current} HTTP {status}')
+        except Exception as e:
+            print(f'MKCOL {current} error: {e}')
+    return True
+
+
 def upload_one(rel_path):
     """Upload one file if needed. rel_path uses forward slashes."""
     local_path = os.path.join(TXT_DIR, *rel_path.split('/'))
@@ -213,6 +230,12 @@ def upload_one(rel_path):
         return False
     local_size = os.path.getsize(local_path)
     url = REMOTE_DIR_URL + urllib.parse.quote(rel_path)
+
+    # Ensure parent directory exists on remote
+    parent_dir = '/'.join(rel_path.split('/')[:-1])
+    if parent_dir:
+        ensure_remote_dir(parent_dir)
+
     cloud_size = None
     try:
         status, body = http_request('PROPFIND', url, depth=0)
@@ -431,6 +454,7 @@ class FTPApp(App):
             note_local = os.path.join(TXT_DIR, REMOTE_FILE_NAME)
             merged_names = set()
 
+            # Step 1: merge txt into zhw63.note (only for existing titles)
             if os.path.exists(note_local):
                 self.update_status('Reading...')
                 with open(note_local, 'r', encoding='utf-8') as f:
@@ -449,17 +473,29 @@ class FTPApp(App):
                             if tab.get('content') != new_content:
                                 tab['content'] = new_content
                             merged_names.add(txt_name)
-                            merged_names.add(f'{safe}.bak')
                             changed += 1
 
                 if changed > 0:
                     with open(note_local, 'w', encoding='utf-8') as f:
                         json.dump(data, f, ensure_ascii=False, indent=2)
 
+            # Step 2: create all local directories on remote (including empty ones)
+            self.update_status('Creating dirs...')
+            for root, dirs, files in os.walk(TXT_DIR):
+                for d in dirs:
+                    full_dir = os.path.join(root, d)
+                    rel_dir = os.path.relpath(full_dir, TXT_DIR).replace(os.sep, '/')
+                    try:
+                        ensure_remote_dir(rel_dir)
+                    except Exception as e:
+                        print(f'MKCOL {rel_dir} failed: {e}')
+
+            # Step 3: upload zhw63.note + all other files (only skip .bak and merged txt)
             self.update_status('Uploading...')
             uploaded = 0
             skipped = 0
 
+            # zhw63.note first
             if os.path.exists(note_local):
                 try:
                     if upload_one(REMOTE_FILE_NAME):
@@ -469,12 +505,13 @@ class FTPApp(App):
                 except Exception as e:
                     print(f'Upload {REMOTE_FILE_NAME} failed: {e}')
 
+            # Walk local dir, upload all files
             for rel in walk_local(TXT_DIR):
                 if rel == REMOTE_FILE_NAME:
                     continue
                 if rel in merged_names:
                     continue
-                if rel.lower().endswith(NEVER_UPLOAD_EXTS):
+                if rel.lower().endswith('.bak'):
                     continue
                 try:
                     if upload_one(rel):
